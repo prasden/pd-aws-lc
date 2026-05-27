@@ -1,0 +1,68 @@
+name: autofix-integration-omnibus
+
+on:
+  workflow_run:
+    workflows: ["integration-omnibus"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "GitHub Actions run ID of the integration-omnibus run to autofix"
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.id || inputs.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+  actions: read
+  pull-requests: write
+
+jobs:
+  autofix:
+    name: autofix
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'schedule' &&
+       github.event.workflow_run.conclusion == 'failure')
+    runs-on:
+      - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
+        image:linux-5.0
+        instance-size:medium
+    env:
+      TARGET_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/configure-aws-credentials
+        with:
+          roleName: AwsLcIntegrationAutofixRole
+      - name: Install Claude Code CLI
+        run: |
+          set -exo pipefail
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+      - name: Fetch GitHub token from Secrets Manager
+        run: |
+          set -eo pipefail
+          token=$(aws secretsmanager get-secret-value \
+            --region us-west-2 \
+            --secret-id aws-lc/ci/github/token \
+            --query SecretString --output text)
+          echo "::add-mask::$token"
+          echo "GH_TOKEN=$token" >> "$GITHUB_ENV"
+      - name: Run autofix
+        env:
+          CLAUDE_CODE_USE_BEDROCK: "1"
+          AWS_REGION: us-west-2
+          ANTHROPIC_DEFAULT_OPUS_MODEL: us.anthropic.claude-opus-4-6-v1
+          ANTHROPIC_DEFAULT_SONNET_MODEL: us.anthropic.claude-sonnet-4-6
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: us.anthropic.claude-haiku-4-5-20251001-v1:0
+          GITHUB_REPO_OWNER: ${{ github.repository_owner }}
+          GITHUB_REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -exo pipefail
+          chmod +x ./tests/ci/integration/auto_fix.sh
+          ./tests/ci/integration/auto_fix.sh "$TARGET_RUN_ID"

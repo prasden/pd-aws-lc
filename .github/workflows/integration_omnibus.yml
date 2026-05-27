@@ -4,6 +4,8 @@ on:
     branches: [ '*' ]
   pull_request:
     branches: [ '*' ]
+  schedule:
+    - cron: "0 0 * * *"
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
   cancel-in-progress: true
@@ -11,6 +13,7 @@ env:
   GOPROXY: https://proxy.golang.org,direct
 permissions:
   contents: read
+  actions: read
 
 jobs:
   integrations:
@@ -488,3 +491,30 @@ jobs:
           run: |
             source /opt/compiler-env/setup-gcc-13.sh
             ./tests/ci/integration/run_ruby_integration.sh ${{ matrix.version }}
+
+  report-failures:
+    name: report-failures
+    needs: [integrations, python, ruby]
+    if: ${{ always() && github.event_name == 'schedule' && (needs.integrations.result == 'failure' || needs.python.result == 'failure' || needs.ruby.result == 'failure') }}
+    runs-on:
+      - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
+        image:linux-5.0
+        instance-size:small
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/configure-aws-credentials
+        with:
+          roleName: AwsLcGitHubActionStandardRole
+      - name: Emit failure metric
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -exo pipefail
+          failure_count=$(
+            gh run view "$GITHUB_RUN_ID" --json jobs --jq \
+              '[.jobs[] | select(.conclusion == "failure" and .name != "report-failures")] | length'
+          )
+          aws cloudwatch put-metric-data \
+            --namespace AWS-LC \
+            --metric-name IntegrationOmnibusFailure \
+            --value "$failure_count"

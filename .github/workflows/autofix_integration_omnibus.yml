@@ -47,10 +47,12 @@ jobs:
       - name: Fetch GitHub token from Secrets Manager
         run: |
           set -eo pipefail
-          token=$(aws secretsmanager get-secret-value \
+          secret=$(aws secretsmanager get-secret-value \
             --region us-west-2 \
             --secret-id aws-lc/ci/github/token \
             --query SecretString --output text)
+          # Secret is JSON-formatted (CodeBuild requirement); extract the token.
+          token=$(echo "$secret" | jq -r '.Token')
           echo "::add-mask::$token"
           echo "GH_TOKEN=$token" >> "$GITHUB_ENV"
       - name: Run autofix

@@ -26,10 +26,7 @@
 set -exuo pipefail
 
 RUN_ID="${1:?Usage: $0 <integration_omnibus_run_id>}"
-# Where we read failure data from (the upstream repo whose run we're fixing).
-SOURCE_REPO="${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}"
-# Where we push branches and open PRs (defaults to origin's repo).
-TARGET_REPO="${AUTOFIX_TARGET_REPO:-$(git -C "$(cd "$(dirname "$0")/../../.." && pwd)" remote get-url origin | sed -E 's#(https://github.com/|git@github.com:)([^/]+/[^/.]+)(\.git)?#\2#')}"
+REPO="${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}"
 MAX_ATTEMPTS=3
 CLAUDE_TIMEOUT_SECONDS=1200
 

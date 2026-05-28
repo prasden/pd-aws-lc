@@ -132,12 +132,12 @@ while IFS= read -r integration; do
     continue
   fi
 
-  # Start each integration from a clean main branch so its commits don't
-  # stack on top of a previous integration's autofix.
+  # Start each integration from the workflow's checked-out commit so its
+  # commits don't stack on top of a previous integration's autofix.
+  base_ref=$(git -C "${SRC_ROOT}" rev-parse HEAD)
   branch_name="autofix/${integration}-${RUN_ID}"
-  git -C "${SRC_ROOT}" checkout main
   git -C "${SRC_ROOT}" branch -D "${branch_name}" 2>/dev/null || true
-  git -C "${SRC_ROOT}" checkout -b "${branch_name}"
+  git -C "${SRC_ROOT}" checkout -B "${branch_name}" "${base_ref}"
 
   # Collect this integration's failing job names + log tails for context.
   jobs_for_int=$(grep "^${integration}\b\|^${integration}-" "${FAILED_JOBS_FILE}" || true)

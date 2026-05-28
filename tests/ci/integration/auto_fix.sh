@@ -26,7 +26,11 @@
 set -exuo pipefail
 
 RUN_ID="${1:?Usage: $0 <integration_omnibus_run_id>}"
-REPO="${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}"
+# Where we read failure data from (the upstream repo whose run we're fixing).
+SOURCE_REPO="${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}"
+# Where we push branches and open PRs. Defaults to origin's repo so testing
+# on a fork doesn't accidentally target upstream.
+TARGET_REPO="${AUTOFIX_TARGET_REPO:-$(git -C "$(cd "$(dirname "$0")/../../.." && pwd)" remote get-url origin | sed -E 's#(https://github.com/|git@github.com:)([^/]+/[^/.]+)(\.git)?#\2#')}"
 MAX_ATTEMPTS=3
 CLAUDE_TIMEOUT_SECONDS=1200
 
@@ -46,9 +50,9 @@ git -C "${SRC_ROOT}" config user.name "AWS-LC CI Autofix"
 gh auth setup-git
 
 # 1. Discover failed jobs from the failing run.
-echo "Fetching failed jobs from run ${RUN_ID} in ${REPO}..."
+echo "Fetching failed jobs from run ${RUN_ID} in ${SOURCE_REPO}..."
 FAILED_JOBS_FILE="${WORK_ROOT}/failed-jobs.txt"
-gh run view "${RUN_ID}" --repo "${REPO}" --json jobs --jq \
+gh run view "${RUN_ID}" --repo "${SOURCE_REPO}" --json jobs --jq \
   '.jobs[] | select(.conclusion == "failure" and .name != "report-failures" and .name != "autofix") | .name' \
   > "${FAILED_JOBS_FILE}"
 
@@ -142,10 +146,10 @@ while IFS= read -r integration; do
   while IFS= read -r job_name; do
     [ -z "${job_name}" ] && continue
     safe_name=$(echo "${job_name}" | tr '/' '_')
-    job_id=$(gh run view "${RUN_ID}" --repo "${REPO}" --json jobs \
+    job_id=$(gh run view "${RUN_ID}" --repo "${SOURCE_REPO}" --json jobs \
       --jq ".jobs[] | select(.name == \"${job_name}\") | .databaseId" | head -n1)
     if [ -n "${job_id}" ]; then
-      gh api "/repos/${REPO}/actions/jobs/${job_id}/logs" \
+      gh api "/repos/${SOURCE_REPO}/actions/jobs/${job_id}/logs" \
         > "${logs_dir}/${safe_name}.log" 2>/dev/null \
         || echo "Could not fetch logs for ${job_name}"
       # Keep only the last 200 lines per job to stay within Claude's context budget
@@ -165,7 +169,7 @@ while IFS= read -r integration; do
     The integration name is: ${integration}.
     The runner script: ${runner_script}
     The current patch directory (the patches that broke): ${patch_dir}
-    The failing GHA run is at https://github.com/${REPO}/actions/runs/${RUN_ID}.
+    The failing GHA run is at https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}.
     Truncated logs from the failed jobs are in: ${logs_dir}
     The repository working copy is rooted at ${SRC_ROOT}. You are currently inside it on a fresh feature branch named ${branch_name} cut from main. Do not switch branches.
     
@@ -177,7 +181,7 @@ while IFS= read -r integration; do
     5. Author corrected patch file(s) that apply cleanly. Place them in ${patch_dir}, replacing the broken ones.
     6. Validate by running \`patch --dry-run -p1\` against a fresh clone — must succeed with no fuzz and no rejected hunks.
     7. Stage your changes (\`git add tests/ci/integration/${integration}_patch\`) and commit with message: 'autofix(${integration}): repair patch broken by downstream change (run ${RUN_ID})'.
-    8. Push the branch and open a DRAFT pull request via the gh CLI: \`gh pr create --draft --title \"autofix(${integration}): repair patch\" --body \"...\"\`. The body should reference the failing run, list which patch files changed, and note that this is an unverified autofix that needs maintainer review.
+    8. Push the branch to origin and open a DRAFT pull request scoped to ${TARGET_REPO} via: \`gh pr create --draft --repo ${TARGET_REPO} --title \"autofix(${integration}): repair patch\" --body \"...\"\`. The body should reference the failing run at https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}, list which patch files changed, and note that this is an unverified autofix that needs maintainer review. Do NOT open the PR against any other repo.
     
     If you cannot produce a clean patch after best-effort attempts, do NOT open a PR. Instead, print 'AUTOFIX_FAILED: ${integration}' to stdout and exit. The on-call will review the failed integration manually.
     

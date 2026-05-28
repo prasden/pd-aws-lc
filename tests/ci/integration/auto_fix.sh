@@ -32,7 +32,7 @@ SOURCE_REPO="${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}"
 # on a fork doesn't accidentally target upstream.
 TARGET_REPO="${AUTOFIX_TARGET_REPO:-$(git -C "$(cd "$(dirname "$0")/../../.." && pwd)" remote get-url origin | sed -E 's#(https://github.com/|git@github.com:)([^/]+/[^/.]+)(\.git)?#\2#')}"
 MAX_ATTEMPTS=3
-CLAUDE_TIMEOUT_SECONDS=1200
+CLAUDE_TIMEOUT_SECONDS=600
 
 SRC_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 INTEGRATION_DIR="${SRC_ROOT}/tests/ci/integration"
@@ -282,7 +282,9 @@ while IFS= read -r integration; do
 Triggering run: https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}
 
 This patch was authored by Claude Code (Bedrock) and independently validated against a fresh clone of the downstream repository via \`patch --dry-run\`. It has NOT been functionally tested. A maintainer must review the diff before merging."
-      git -C "${SRC_ROOT}" push --force-with-lease origin "${branch_name}"
+      git -C "${SRC_ROOT}" push --force-with-lease \
+        "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" \
+        "${branch_name}"
       gh pr create --draft --repo "${TARGET_REPO}" \
         --base "$(git -C "${SRC_ROOT}" symbolic-ref refs/remotes/origin/HEAD --short 2>/dev/null | sed 's@^origin/@@' || echo main)" \
         --head "${branch_name}" \

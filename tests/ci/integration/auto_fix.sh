@@ -206,10 +206,23 @@ while IFS= read -r integration; do
 
   # Run Claude. Up to MAX_ATTEMPTS retries on infra/timeout errors.
   attempt=0
-  rc=1
-  while [ "${attempt}" -lt "${MAX_ATTEMPTS}" ] && [ "${rc}" -ne 0 ]; do
+  fixed=false
+  validation_error=""
+  while [ "${attempt}" -lt "${MAX_ATTEMPTS}" ] && [ "${fixed}" = "false" ]; do
     attempt=$((attempt + 1))
     echo "=== Autofix attempt ${attempt}/${MAX_ATTEMPTS} for ${integration} ==="
+
+    # On retry after validation failure, include the error so Claude can correct.
+    retry_context=""
+    if [ -n "${validation_error}" ]; then
+      retry_context="
+
+    IMPORTANT: Your previous attempt produced patches that FAILED independent validation.
+    The validation error was:
+    ${validation_error}
+
+    Please fix the patches so they apply cleanly. Do NOT repeat the same mistake."
+    fi
 
     prompt="You are auto-fixing a broken integration test patch in AWS-LC.
 
@@ -219,7 +232,7 @@ while IFS= read -r integration; do
     The failing GHA run is at https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}.
     Truncated logs from the failed jobs are in: ${logs_dir}
     The repository working copy is rooted at ${SRC_ROOT}. You are currently inside it on a fresh feature branch named ${branch_name} cut from main. Do not switch branches.
-    
+    ${retry_context}
     Your task:
     1. Read the runner script and identify the downstream repository URL, the branch/tag it clones, and how the patches are applied (\`patch -p1\` is the standard).
     2. Clone the downstream repo into a scratch directory under ${WORK_ROOT}/${integration}/src.
@@ -230,13 +243,13 @@ while IFS= read -r integration; do
     7. Stage your changes (\`git add tests/ci/integration/${integration}_patch\`) and commit with message: 'autofix(${integration}): repair patch broken by downstream change (run ${RUN_ID})'.
 
     Do NOT push the branch. Do NOT open a pull request. The autofix script will push and open the PR after independently re-validating the patches. Just leave the commit on the local branch.
-    
+
     If you cannot produce a clean patch after best-effort attempts, do NOT open a PR. Instead, print 'AUTOFIX_FAILED: ${integration}' to stdout and exit. The on-call will review the failed integration manually.
-    
+
     Use the gh CLI for any GitHub API calls. GH_TOKEN is already set."
 
     set +e
-    stream_log="${WORK_ROOT}/${integration}/claude-stream.jsonl"
+    stream_log="${WORK_ROOT}/${integration}/claude-stream-${attempt}.jsonl"
     timeout "${CLAUDE_TIMEOUT_SECONDS}" claude -p "${prompt}" \
       --allowedTools "Read,Glob,Grep,Bash,Edit,Write,Agent,WebFetch" \
       --output-format stream-json --verbose \
@@ -248,7 +261,7 @@ while IFS= read -r integration; do
     # runner log shows what Claude actually did.
     if [ -s "${stream_log}" ]; then
       echo ""
-      echo "::group::Claude tool calls (${integration})"
+      echo "::group::Claude tool calls (${integration}, attempt ${attempt})"
       jq -r '
         select(.type == "assistant") | .message.content[]?
         | select(.type == "tool_use")
@@ -256,7 +269,7 @@ while IFS= read -r integration; do
       ' "${stream_log}" 2>/dev/null || true
       echo "::endgroup::"
       echo ""
-      echo "::group::Claude response (${integration})"
+      echo "::group::Claude response (${integration}, attempt ${attempt})"
       jq -r '
         select(.type == "result") | .result // .message.content[]?.text // empty
       ' "${stream_log}" 2>/dev/null || true
@@ -265,44 +278,49 @@ while IFS= read -r integration; do
 
     if [ "${rc}" -eq 124 ]; then
       echo "Claude timed out for ${integration} on attempt ${attempt}."
+      continue
     elif [ "${rc}" -ne 0 ]; then
       echo "Claude exited with code ${rc} for ${integration} on attempt ${attempt}."
+      continue
+    fi
+
+    # Claude succeeded — now validate the patches independently.
+    echo ""
+    echo "::group::Independent patch validation (${integration}, attempt ${attempt})"
+    validation_error=$(validate_patches "${integration}" "${patch_dir}" "${runner_script}" 2>&1) && valid=true || valid=false
+    echo "${validation_error}"
+    echo "::endgroup::"
+
+    if [ "${valid}" = "true" ]; then
+      fixed=true
+    else
+      echo "::warning::Patch validation failed for ${integration} on attempt ${attempt}; retrying..."
+      # Reset branch to base so Claude starts fresh on next attempt.
+      git -C "${SRC_ROOT}" reset --hard "${base_ref}"
     fi
   done
 
-  if [ "${rc}" -eq 0 ]; then
+  if [ "${fixed}" = "true" ]; then
     echo ""
-    echo "::group::Independent patch validation (${integration})"
-    if validate_patches "${integration}" "${patch_dir}" "${runner_script}"; then
-      echo "::endgroup::"
-      echo ""
-      echo "::group::Push branch and open draft PR (${integration})"
-      pr_body="Automated patch repair for ${integration} integration.
+    echo "::group::Push branch and open draft PR (${integration})"
+    pr_body="Automated patch repair for ${integration} integration.
 
 Triggering run: https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}
 
 This patch was authored by Claude Code (Bedrock) and independently validated against a fresh clone of the downstream repository via \`patch --dry-run\`. It has NOT been functionally tested. A maintainer must review the diff before merging."
-      git -C "${SRC_ROOT}" push \
-        "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" \
-        "${branch_name}"
-      gh pr create --draft --repo "${TARGET_REPO}" \
-        --base "$(git -C "${SRC_ROOT}" symbolic-ref refs/remotes/origin/HEAD --short 2>/dev/null | sed 's@^origin/@@' || echo main)" \
-        --head "${branch_name}" \
-        --title "autofix(${integration}): repair patch" \
-        --body "${pr_body}" || echo "::warning::PR may already exist for ${integration}"
-      echo "::endgroup::"
-    else
-      echo "::endgroup::"
-      echo "::warning::Skipping push/PR for ${integration} because patches did not validate."
-      overall_status=1
-    fi
-  fi
-
-  if [ "${rc}" -ne 0 ]; then
-    echo "Autofix gave up on ${integration} after ${MAX_ATTEMPTS} attempts."
-    overall_status=1
+    git -C "${SRC_ROOT}" push \
+      "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" \
+      "${branch_name}"
+    gh pr create --draft --repo "${TARGET_REPO}" \
+      --base "$(git -C "${SRC_ROOT}" symbolic-ref refs/remotes/origin/HEAD --short 2>/dev/null | sed 's@^origin/@@' || echo main)" \
+      --head "${branch_name}" \
+      --title "autofix(${integration}): repair patch" \
+      --body "${pr_body}" || echo "::warning::PR may already exist for ${integration}"
+    echo "::endgroup::"
+  else
+    echo "::warning::Autofix could not produce valid patches for ${integration} after ${MAX_ATTEMPTS} attempts."
   fi
 done < "${INTEGRATIONS_FILE}"
 
 echo "Autofix run complete."
-exit "${overall_status}"
+exit 0

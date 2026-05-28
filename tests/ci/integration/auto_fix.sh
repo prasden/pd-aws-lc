@@ -282,7 +282,7 @@ while IFS= read -r integration; do
 Triggering run: https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}
 
 This patch was authored by Claude Code (Bedrock) and independently validated against a fresh clone of the downstream repository via \`patch --dry-run\`. It has NOT been functionally tested. A maintainer must review the diff before merging."
-      git -C "${SRC_ROOT}" push --force-with-lease \
+      git -C "${SRC_ROOT}" push \
         "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" \
         "${branch_name}"
       gh pr create --draft --repo "${TARGET_REPO}" \

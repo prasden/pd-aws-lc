@@ -57,6 +57,38 @@ build_prompt() {
       "${SCRIPT_DIR}/prompt.md"
 }
 
+# Validate patches apply cleanly against a fresh downstream clone.
+# $1 = patch directory, $2 = runner script, $3 = version/branch (optional)
+validate_patches() {
+  local clone_url
+  clone_url=$(grep -oE 'git clone [^;|&]+' "$2" \
+    | grep -v 'apr\|libevent\|abrmd' | head -1 \
+    | grep -oE 'https://[^ "]+') || return 0
+
+  local vdir="${WORK_ROOT}/validate-tmp"
+  rm -rf "${vdir}"
+
+  # If version subdir exists, validate only that branch.
+  local patch_src="$1"
+  if [ -n "$3" ] && [ -d "$1/$3" ]; then
+    patch_src="$1/$3"
+    git clone --depth 1 --branch "$3" "${clone_url}" "${vdir}" || return 1
+  else
+    git clone --depth 1 "${clone_url}" "${vdir}" || return 1
+  fi
+
+  local fails=0
+  for f in $(find -L "${patch_src}" -type f -name '*.patch'); do
+    if ! patch --dry-run -p1 -d "${vdir}" < "${f}" >/dev/null 2>&1; then
+      echo "FAIL: $(basename "${f}")"
+      fails=$((fails + 1))
+    fi
+  done
+
+  rm -rf "${vdir}"
+  [ "${fails}" -eq 0 ]
+}
+
 run_claude() {
   set +e
   timeout "${CLAUDE_TIMEOUT}" claude -p "$1" \
@@ -166,15 +198,27 @@ while IFS='|' read -r integration version; do
   fetch_logs "${integration}" "${work_dir}/logs"
 
   fixed=false
+  validation_error=""
   for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
     echo "=== ${target}: attempt ${attempt}/${MAX_ATTEMPTS} ==="
     prompt=$(build_prompt "${integration}" "${version}" "${patch_dir}" "${runner_script}" \
-      "${work_dir}/logs" "${branch_name}" "")
-    if run_claude "${prompt}" "${work_dir}/claude-${attempt}.log"; then
+      "${work_dir}/logs" "${branch_name}" "${validation_error}")
+    if ! run_claude "${prompt}" "${work_dir}/claude-${attempt}.log"; then
+      echo "::warning::Claude failed on attempt ${attempt}; retrying..."
+      git -C "${SRC_ROOT}" reset --hard "${base_ref}"
+      validation_error=""
+      continue
+    fi
+    # Claude succeeded — validate the patches ourselves.
+    if validation_error=$(validate_patches "${patch_dir}" "${runner_script}" "${version}" 2>&1); then
       fixed=true
       break
     fi
-    echo "::warning::Claude failed on attempt ${attempt}; retrying..."
+    echo "::warning::Patch validation failed on attempt ${attempt}; retrying..."
+    echo "${validation_error}"
+    validation_error="IMPORTANT: Your patches FAILED independent validation:
+${validation_error}
+Fix the patches so they apply cleanly with zero fuzz and zero rejects."
     git -C "${SRC_ROOT}" reset --hard "${base_ref}"
   done
 

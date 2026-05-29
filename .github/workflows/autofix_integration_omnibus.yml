@@ -70,5 +70,5 @@ jobs:
           GITHUB_REPO_NAME: aws-lc
         run: |
           set -exo pipefail
-          chmod +x ./tests/ci/integration/auto_fix.sh
-          ./tests/ci/integration/auto_fix.sh "$TARGET_RUN_ID"
+          chmod +x ./tests/ci/integration/auto_fix_integrations/auto_fix.sh
+          ./tests/ci/integration/auto_fix_integrations/auto_fix.sh "$TARGET_RUN_ID"

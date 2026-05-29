@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0 OR ISC
+#
+# Drives the autofix loop for failed integration tests. For each failed job:
+#   1. Asks Claude (via Bedrock) to repair the patch
+#   2. Validates the result against a fresh downstream clone
+#   3. Pushes the fix to a branch and opens a draft PR
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+
+
+# ---------- Setup -------------------------------------------------------------
 
 setup() {
   RUN_ID="${1:?Usage: $0 <integration_omnibus_run_id>}"
@@ -19,37 +27,56 @@ setup() {
 
   mkdir -p "${WORK_ROOT}"
 
-  if [ -z "${GH_TOKEN:-}" ]; then
+  if [[ -z "${GH_TOKEN:-}" ]]; then
     echo "GH_TOKEN is not set; cannot push branches or open PRs."
     exit 1
   fi
+
   git -C "${SRC_ROOT}" config user.email "aws-lc-ci@amazon.com"
-  git -C "${SRC_ROOT}" config user.name "AWS-LC CI Autofix"
+  git -C "${SRC_ROOT}" config user.name  "AWS-LC CI Autofix"
 }
 
 
-# Fetch last 200 lines of each failed job's log for Claude context.
+# ---------- Helpers -----------------------------------------------------------
+
+# Fetch the last 200 lines of each failed job's log into the given directory.
+# Args: $1 = integration name, $2 = output directory
 fetch_logs() {
-  mkdir -p "$2"
+  local integration="$1"
+  local logs_dir="$2"
+  local prefix="${integration//_/-}"
+
+  mkdir -p "${logs_dir}"
+
+  local job_id
   for job_id in $(gh api "/repos/${SOURCE_REPO}/actions/runs/${RUN_ID}/jobs" \
-    --paginate \
-    --jq ".jobs[]
-      | select(.conclusion == \"failure\" and (.name | startswith(\"${1//_/-}\")))
-      | .id")
+                    --paginate \
+                    --jq ".jobs[]
+                          | select(.conclusion == \"failure\" and (.name | startswith(\"${prefix}\")))
+                          | .id")
   do
     gh api "/repos/${SOURCE_REPO}/actions/jobs/${job_id}/logs" \
-      | tail -n 200 > "$2/${job_id}.log" || true
+      | tail -n 200 > "${logs_dir}/${job_id}.log" || true
   done
 }
 
+# Render the prompt template with the given context.
 build_prompt() {
-  sed -e "s|INTEGRATION_PLACEHOLDER|$1|g" \
-      -e "s|VERSION_PLACEHOLDER|${2:-all}|g" \
-      -e "s|PATCH_DIR_PLACEHOLDER|$3|g" \
-      -e "s|RUNNER_SCRIPT_PLACEHOLDER|$4|g" \
-      -e "s|LOGS_DIR_PLACEHOLDER|$5|g" \
-      -e "s|BRANCH_NAME_PLACEHOLDER|$6|g" \
-      -e "s|RETRY_CONTEXT_FILE_PLACEHOLDER|${7:-/dev/null}|g" \
+  local integration="$1"
+  local version="$2"
+  local patch_dir="$3"
+  local runner_script="$4"
+  local logs_dir="$5"
+  local branch_name="$6"
+  local retry_file="${7:-/dev/null}"
+
+  sed -e "s|INTEGRATION_PLACEHOLDER|${integration}|g" \
+      -e "s|VERSION_PLACEHOLDER|${version:-all}|g" \
+      -e "s|PATCH_DIR_PLACEHOLDER|${patch_dir}|g" \
+      -e "s|RUNNER_SCRIPT_PLACEHOLDER|${runner_script}|g" \
+      -e "s|LOGS_DIR_PLACEHOLDER|${logs_dir}|g" \
+      -e "s|BRANCH_NAME_PLACEHOLDER|${branch_name}|g" \
+      -e "s|RETRY_CONTEXT_FILE_PLACEHOLDER|${retry_file}|g" \
       -e "s|FAILING_RUN_PLACEHOLDER|https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}|g" \
       -e "s|SRC_ROOT_PLACEHOLDER|${SRC_ROOT}|g" \
       -e "s|WORK_ROOT_PLACEHOLDER|${WORK_ROOT}|g" \
@@ -57,7 +84,8 @@ build_prompt() {
       "${SCRIPT_DIR}/prompt.md"
 }
 
-# Hardcoded downstream repo URLs per integration (source of truth for validation).
+# Source-of-truth map from integration name → downstream git URL.
+# Used to independently validate Claude's patches against fresh upstream code.
 clone_url_for() {
   case "$1" in
     bind9)         echo "https://gitlab.isc.org/isc-projects/bind9.git" ;;
@@ -68,7 +96,7 @@ clone_url_for() {
     mariadb)       echo "https://github.com/MariaDB/server.git" ;;
     mysql)         echo "https://github.com/mysql/mysql-server.git" ;;
     nmap)          echo "https://github.com/nmap/nmap.git" ;;
-    ntp)           echo "" ;;  # ntp uses tarball, not git
+    ntp)           echo "" ;;  # ntp uses a tarball, no validation
     openldap)      echo "https://github.com/openldap/openldap.git" ;;
     openvpn)       echo "https://github.com/OpenVPN/openvpn.git" ;;
     postgres)      echo "https://github.com/postgres/postgres.git" ;;
@@ -83,78 +111,178 @@ clone_url_for() {
   esac
 }
 
-# Validate patches apply cleanly against a fresh downstream clone.
-# $1 = integration name, $2 = patch directory, $3 = version/branch (optional)
+# Run `patch --dry-run` against a fresh downstream clone. Returns 0 if all
+# patches apply cleanly, non-zero otherwise (with FAIL: lines on stdout).
 validate_patches() {
+  local integration="$1"
+  local patch_dir="$2"
+  local version="$3"
+
   local clone_url
-  clone_url=$(clone_url_for "$1")
-  [ -z "${clone_url}" ] && return 0  # no validation if URL unknown
+  clone_url=$(clone_url_for "${integration}")
+  # If no URL is defined (e.g. ntp uses a tarball), skip validation and treat
+  # as success so the PR still gets opened.
+  [[ -z "${clone_url}" ]] && return 0
 
-  local vdir="${WORK_ROOT}/validate-tmp"
-  rm -rf "${vdir}"
-
-  local patch_src="$2"
-  if [ -n "$3" ] && [ -d "$2/$3" ]; then
-    patch_src="$2/$3"
-    git clone --depth 1 --branch "$3" "${clone_url}" "${vdir}" || return 1
-  else
-    git clone --depth 1 "${clone_url}" "${vdir}" || return 1
+  # Some patch dirs are laid out by branch (e.g. python_patch/3.13)
+  # We need to validate only the failing branch.
+  local patch_src="${patch_dir}"
+  local branch_arg=()
+  if [[ -n "${version}" && -d "${patch_dir}/${version}" ]]; then
+    patch_src="${patch_dir}/${version}"
+    branch_arg=(--branch "${version}")
   fi
 
+  local validation_directory="${WORK_ROOT}/validate-tmp"
+  rm -rf "${validation_directory}"
+  git clone --depth 1 "${branch_arg[@]}" "${clone_url}" "${validation_directory}" || return 1
+
   local fails=0
-  for f in $(find -L "${patch_src}" -type f -name '*.patch'); do
-    if ! patch --dry-run -p1 -d "${vdir}" < "${f}" >/dev/null 2>&1; then
-      echo "FAIL: $(basename "${f}")"
+  local patch_file
+  while IFS= read -r patch_file; do
+    if ! patch --dry-run -p1 -d "${vdir}" < "${patch_file}" >/dev/null 2>&1; then
+      echo "FAIL: $(basename "${patch_file}")"
       fails=$((fails + 1))
     fi
-  done
+  done < <(find -L "${patch_src}" -type f -name '*.patch')
 
   rm -rf "${vdir}"
-  [ "${fails}" -eq 0 ]
+  [[ "${fails}" -eq 0 ]]
 }
 
 run_claude() {
+  local prompt="$1"
+  local log_file="$2"
+
   set +e
-  timeout "${CLAUDE_TIMEOUT}" claude -p "$1" \
+  timeout "${CLAUDE_TIMEOUT}" claude -p "${prompt}" \
     --allowedTools "Read,Glob,Grep,Bash,Edit,Write,Agent,WebFetch" \
-    --verbose > "$2"
+    --verbose > "${log_file}"
   local rc=$?
   set -e
-  if [ "${rc}" -eq 124 ]; then
+
+  if [[ "${rc}" -eq 124 ]]; then
     echo "::warning::Claude timed out after ${CLAUDE_TIMEOUT}s."
-  elif [ "${rc}" -ne 0 ]; then
+  elif [[ "${rc}" -ne 0 ]]; then
     echo "::warning::Claude exited with code ${rc}."
   fi
 
   return "${rc}"
 }
 
+# Push the fix branch and open (or update) the draft PR.
 open_pr() {
+  local target="$1"
+  local branch_name="$2"
+  local push_url="https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git"
 
-  # Skip if the remote branch already has the same changes, so no new PRs or incessant commits are created. 
-  if git -C "${SRC_ROOT}" fetch \
-    "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" \
-    "$2" 2>/dev/null; then
-    if git -C "${SRC_ROOT}" diff --quiet FETCH_HEAD HEAD -- ; then
-      echo "No new changes for $1; skipping push."
-      return
-    fi
+  # Skip if the remote branch already has the same changes (avoids re-pushing
+  # identical fixes night after night).
+  if git -C "${SRC_ROOT}" fetch "${push_url}" "${branch_name}" 2>/dev/null \
+     && git -C "${SRC_ROOT}" diff --quiet FETCH_HEAD HEAD; then
+    echo "No new changes for ${target}; skipping push."
+    return
   fi
 
-  git -C "${SRC_ROOT}" push --force \
-    "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" \
-    "$2"
+  git -C "${SRC_ROOT}" push --force "${push_url}" "${branch_name}"
+
   gh pr create --draft --repo "${TARGET_REPO}" \
-    --head "$2" \
-    --title "autofix($1): repair patch" \
-    --body "$(git -C "${SRC_ROOT}" log -1 --format=%b)
+    --head "${branch_name}" \
+    --title "autofix(${target}): repair patch" \
+    --body  "$(git -C "${SRC_ROOT}" log -1 --format=%b)
     ---
     This PR was drafted automatically by the nightly autofix workflow using Claude Code. A maintainer should review and run CI before merging.
     Triggered by: https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}" \
-    || true
+    || true  # PR may already exist; that's fine.
 }
 
-# --- Main ---------------------------------------------------------------------
+# Map a failed job name to its (integration, version) tuple.
+# Echoes "integration|version" on stdout, or nothing if the job has no patches.
+classify_job() {
+  local job="$1"
+  local integration version
+
+  case "${job}" in
+    tpm2-tools*)        integration="tpm2_tools"; version="" ;;
+    tpm2-tss*)          integration="tpm2_tss";   version="" ;;
+    postgresql*)        integration="postgres";   version="" ;;
+    python-main*)       return ;;  # no patches for python main
+    python-*)           integration="python";     version=$(cut -d- -f2 <<< "${job}") ;;
+    ruby-master*)       integration="ruby";       version="" ;;  # uses ruby_patch_common only
+    ruby-*)             integration="ruby";       version=$(cut -d- -f2 <<< "${job}") ;;
+    openldap-v2.5*)     integration="openldap";   version="OPENLDAP_REL_ENG_2_5" ;;
+    openldap-*)         integration="openldap";   version=$(cut -d- -f2 <<< "${job}") ;;
+    openvpn-master*)    return ;;  # no patches for openvpn master
+    openvpn-*)          integration="openvpn";    version="" ;;
+    *)                  integration="${job%%-*}"; version="" ;;
+  esac
+
+  [[ -d "${INTEGRATION_DIR}/${integration}_patch" ]] || return 0
+  echo "${integration}|${version}"
+}
+
+# Run the full fix-and-PR loop for one (integration, version) target.
+fix_target() {
+  local integration="$1"
+  local version="$2"
+  local base_ref="$3"
+
+  local patch_dir="${INTEGRATION_DIR}/${integration}_patch"
+  local runner_script="${INTEGRATION_DIR}/run_${integration}_integration.sh"
+  [[ -d "${patch_dir}" && -f "${runner_script}" ]] || return
+
+  local target="${integration}${version:+-${version}}"
+  local branch_name="autofix/${target}"
+  local work_dir="${WORK_ROOT}/${target}"
+  local retry_file="${work_dir}/retry-context.txt"
+
+  mkdir -p "${work_dir}"
+  rm -f "${retry_file}"
+
+  # Start from a clean branch off the base commit.
+  git -C "${SRC_ROOT}" branch -D "${branch_name}" 2>/dev/null || true
+  git -C "${SRC_ROOT}" checkout -B "${branch_name}" "${base_ref}"
+
+  fetch_logs "${integration}" "${work_dir}/logs"
+
+  local attempt validation_output
+  for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
+    echo "=== ${target}: attempt ${attempt}/${MAX_ATTEMPTS} ==="
+
+    local prompt
+    prompt=$(build_prompt "${integration}" "${version}" "${patch_dir}" \
+                          "${runner_script}" "${work_dir}/logs" \
+                          "${branch_name}" "${retry_file}")
+
+    if ! run_claude "${prompt}" "${work_dir}/claude-${attempt}.log"; then
+      echo "::warning::Claude failed on attempt ${attempt}; retrying..."
+      git -C "${SRC_ROOT}" reset --hard "${base_ref}"
+      rm -f "${retry_file}"
+      continue
+    fi
+
+    if validation_output=$(validate_patches "${integration}" "${patch_dir}" "${version}" 2>&1); then
+      open_pr "${target}" "${branch_name}"
+      return
+    fi
+
+    # Validation failed: feed the error back to Claude on the next attempt.
+    echo "::warning::Patch validation failed on attempt ${attempt}; retrying..."
+    echo "${validation_output}"
+    {
+      echo "IMPORTANT: Your previous patches FAILED independent validation:"
+      echo "${validation_output}"
+      echo
+      echo "Fix the patches so they apply cleanly with zero fuzz and zero rejects."
+    } > "${retry_file}"
+    git -C "${SRC_ROOT}" reset --hard "${base_ref}"
+  done
+
+  echo "::warning::Could not fix ${target} after ${MAX_ATTEMPTS} attempts."
+}
+
+
+# ---------- Main --------------------------------------------------------------
 
 setup "$1"
 
@@ -162,102 +290,44 @@ setup "$1"
 echo "Fetching failed jobs from run ${RUN_ID}..."
 FAILED_JOBS_FILE="${WORK_ROOT}/failed-jobs.txt"
 gh api "/repos/${SOURCE_REPO}/actions/runs/${RUN_ID}/jobs" --paginate \
-  --jq '.jobs[] | select(.conclusion == "failure" and .name != "report-failures" and .name != "autofix") | .name' \
+  --jq '.jobs[]
+        | select(.conclusion == "failure" and .name != "report-failures" and .name != "autofix")
+        | .name' \
   > "${FAILED_JOBS_FILE}"
 
-if [ ! -s "${FAILED_JOBS_FILE}" ]; then
+if [[ ! -s "${FAILED_JOBS_FILE}" ]]; then
   echo "No failed jobs; nothing to autofix."
   exit 0
 fi
 cat "${FAILED_JOBS_FILE}"
 
-
-# 2. Map failed job names → integration + version.
-# Deduplicates so python-3.13-fips-... and python-3.13-crt-... become one fix.
-# Skips jobs with no patch directory or no patchable version.
+# 2. Map failed jobs to unique (integration, version) targets.
+# Multiple jobs (e.g. python-3.13-fips-..., python-3.13-crt-...) collapse to
+# a single fix.
 TARGETS_FILE="${WORK_ROOT}/targets.txt"
 : > "${TARGETS_FILE}"
 
 while IFS= read -r job; do
-  [ -z "${job}" ] && continue
-  if   [[ "${job}" == tpm2-tools* ]];       then integration="tpm2_tools"; version=""
-  elif [[ "${job}" == tpm2-tss* ]];         then integration="tpm2_tss"; version=""
-  elif [[ "${job}" == postgresql* ]];       then integration="postgres"; version=""
-  elif [[ "${job}" == python-main* ]];      then continue  # no patches for python main
-  elif [[ "${job}" == python-* ]];          then integration="python"; version=$(echo "${job}" | cut -d- -f2)
-  elif [[ "${job}" == ruby-master* ]];      then integration="ruby"; version=""  # uses ruby_patch_common only
-  elif [[ "${job}" == ruby-* ]];            then integration="ruby"; version=$(echo "${job}" | cut -d- -f2)
-  elif [[ "${job}" == openldap-v2.5* ]];    then integration="openldap"; version="OPENLDAP_REL_ENG_2_5"
-  elif [[ "${job}" == openldap-* ]];        then integration="openldap"; version=$(echo "${job}" | cut -d- -f2)
-  elif [[ "${job}" == openvpn-master* ]];   then continue  # no patches for openvpn master
-  elif [[ "${job}" == openvpn-* ]];         then integration="openvpn"; version=""
-  else integration="${job%%-*}"; version=""
-  fi
-  [ -d "${INTEGRATION_DIR}/${integration}_patch" ] || continue
-  echo "${integration}|${version}" >> "${TARGETS_FILE}"
+  [[ -z "${job}" ]] && continue
+  classify_job "${job}" >> "${TARGETS_FILE}" || true
 done < "${FAILED_JOBS_FILE}"
 
 sort -u -o "${TARGETS_FILE}" "${TARGETS_FILE}"
 
-if [ ! -s "${TARGETS_FILE}" ]; then
+if [[ ! -s "${TARGETS_FILE}" ]]; then
   echo "No failed jobs map to a known patch directory."
   exit 0
 fi
 echo "Targets to fix:"
 cat "${TARGETS_FILE}"
 
-# Capture base ref once — every target branches off the same starting commit.
-base_ref=$(git -C "${SRC_ROOT}" rev-parse HEAD)
+# 3. For each target: attempt the fix, validate, push, open PR.
+# All targets branch from the same starting commit (this run's HEAD).
+BASE_REF=$(git -C "${SRC_ROOT}" rev-parse HEAD)
 
 while IFS='|' read -r integration version; do
-  [ -z "${integration}" ] && continue
-  patch_dir="${INTEGRATION_DIR}/${integration}_patch"
-  runner_script="${INTEGRATION_DIR}/run_${integration}_integration.sh"
-  [ -d "${patch_dir}" ] && [ -f "${runner_script}" ] || continue
-
-  target="${integration}${version:+-${version}}"
-  branch_name="autofix/${target}"
-  work_dir="${WORK_ROOT}/${target}"
-  retry_file="${work_dir}/retry-context.txt"
-  mkdir -p "${work_dir}"
-  rm -f "${retry_file}"
-
-  git -C "${SRC_ROOT}" branch -D "${branch_name}" 2>/dev/null || true
-  git -C "${SRC_ROOT}" checkout -B "${branch_name}" "${base_ref}"
-  fetch_logs "${integration}" "${work_dir}/logs"
-
-  fixed=false
-  for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
-    echo "=== ${target}: attempt ${attempt}/${MAX_ATTEMPTS} ==="
-    prompt=$(build_prompt "${integration}" "${version}" "${patch_dir}" "${runner_script}" \
-      "${work_dir}/logs" "${branch_name}" "${retry_file}")
-    if ! run_claude "${prompt}" "${work_dir}/claude-${attempt}.log"; then
-      echo "::warning::Claude failed on attempt ${attempt}; retrying..."
-      git -C "${SRC_ROOT}" reset --hard "${base_ref}"
-      rm -f "${retry_file}"
-      continue
-    fi
-    # Claude succeeded — validate the patches ourselves.
-    if validation_output=$(validate_patches "${integration}" "${patch_dir}" "${version}" 2>&1); then
-      fixed=true
-      break
-    fi
-    echo "::warning::Patch validation failed on attempt ${attempt}; retrying..."
-    echo "${validation_output}"
-    {
-      echo "IMPORTANT: Your previous patches FAILED independent validation:"
-      echo "${validation_output}"
-      echo ""
-      echo "Fix the patches so they apply cleanly with zero fuzz and zero rejects."
-    } > "${retry_file}"
-    git -C "${SRC_ROOT}" reset --hard "${base_ref}"
-  done
-
-  if [ "${fixed}" = "true" ]; then
-    open_pr "${target}" "${branch_name}"
-  else
-    echo "::warning::Could not fix ${target} after ${MAX_ATTEMPTS} attempts."
-  fi
+  [[ -z "${integration}" ]] && continue
+  fix_target "${integration}" "${version}" "${BASE_REF}"
 done < "${TARGETS_FILE}"
 
 echo "Autofix complete."

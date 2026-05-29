@@ -510,10 +510,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -exo pipefail
-          failure_count=$(
-            gh run view "$GITHUB_RUN_ID" --json jobs --jq \
-              '[.jobs[] | select(.conclusion == "failure" and .name != "report-failures")] | length'
-          )
+          failure_count=$(gh run view "$GITHUB_RUN_ID" --json jobs \
+            --jq '[.jobs[] | select(.conclusion == "failure" and .name != "report-failures")] | length')
+
           aws cloudwatch put-metric-data \
             --namespace AWS-LC \
             --metric-name IntegrationOmnibusFailure \

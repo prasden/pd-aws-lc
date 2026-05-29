@@ -7,7 +7,7 @@ Patch directory: PATCH_DIR_PLACEHOLDER
 Failing run: FAILING_RUN_PLACEHOLDER
 Logs: LOGS_DIR_PLACEHOLDER
 Repo root: SRC_ROOT_PLACEHOLDER (on branch BRANCH_NAME_PLACEHOLDER, cut from main)
-RETRY_CONTEXT_PLACEHOLDER
+Retry context (read this file first if it exists; it contains errors from your previous attempt): RETRY_CONTEXT_FILE_PLACEHOLDER
 
 Steps:
 1. Read the runner script — find the downstream repo URL, branch/tag, and how patches are applied.

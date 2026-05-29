@@ -15,7 +15,7 @@ setup() {
   INTEGRATION_DIR="${SRC_ROOT}/tests/ci/integration"
   WORK_ROOT="${SRC_ROOT}/.autofix-workspace"
   MAX_ATTEMPTS=3
-  CLAUDE_TIMEOUT=600
+  CLAUDE_TIMEOUT=900
 
   mkdir -p "${WORK_ROOT}"
 
@@ -49,7 +49,7 @@ build_prompt() {
       -e "s|RUNNER_SCRIPT_PLACEHOLDER|$4|g" \
       -e "s|LOGS_DIR_PLACEHOLDER|$5|g" \
       -e "s|BRANCH_NAME_PLACEHOLDER|$6|g" \
-      -e "s|RETRY_CONTEXT_PLACEHOLDER|${7:-}|g" \
+      -e "s|RETRY_CONTEXT_FILE_PLACEHOLDER|${7:-/dev/null}|g" \
       -e "s|FAILING_RUN_PLACEHOLDER|https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}|g" \
       -e "s|SRC_ROOT_PLACEHOLDER|${SRC_ROOT}|g" \
       -e "s|WORK_ROOT_PLACEHOLDER|${WORK_ROOT}|g" \
@@ -57,21 +57,45 @@ build_prompt() {
       "${SCRIPT_DIR}/prompt.md"
 }
 
+# Hardcoded downstream repo URLs per integration (source of truth for validation).
+clone_url_for() {
+  case "$1" in
+    bind9)         echo "https://gitlab.isc.org/isc-projects/bind9.git" ;;
+    libgit2)       echo "https://github.com/libgit2/libgit2.git" ;;
+    librdkafka)    echo "https://github.com/confluentinc/librdkafka.git" ;;
+    librelp)       echo "https://github.com/rsyslog/librelp.git" ;;
+    libwebsockets) echo "https://github.com/warmcat/libwebsockets.git" ;;
+    mariadb)       echo "https://github.com/MariaDB/server.git" ;;
+    mysql)         echo "https://github.com/mysql/mysql-server.git" ;;
+    nmap)          echo "https://github.com/nmap/nmap.git" ;;
+    ntp)           echo "" ;;  # ntp uses tarball, not git
+    openldap)      echo "https://github.com/openldap/openldap.git" ;;
+    openvpn)       echo "https://github.com/OpenVPN/openvpn.git" ;;
+    postgres)      echo "https://github.com/postgres/postgres.git" ;;
+    pyopenssl)     echo "https://github.com/pyca/pyopenssl.git" ;;
+    python)        echo "https://github.com/python/cpython.git" ;;
+    ruby)          echo "https://github.com/ruby/ruby.git" ;;
+    sslproxy)      echo "https://github.com/sonertari/SSLproxy.git" ;;
+    tcpdump)       echo "https://github.com/the-tcpdump-group/tcpdump.git" ;;
+    tpm2_tools)    echo "https://github.com/tpm2-software/tpm2-tools.git" ;;
+    tpm2_tss)      echo "https://github.com/tpm2-software/tpm2-tss.git" ;;
+    trousers)      echo "https://git.code.sf.net/p/trousers/trousers" ;;
+  esac
+}
+
 # Validate patches apply cleanly against a fresh downstream clone.
-# $1 = patch directory, $2 = runner script, $3 = version/branch (optional)
+# $1 = integration name, $2 = patch directory, $3 = version/branch (optional)
 validate_patches() {
   local clone_url
-  clone_url=$(grep -oE 'git clone [^;|&]+' "$2" \
-    | grep -v 'apr\|libevent\|abrmd' | head -1 \
-    | grep -oE 'https://[^ "]+') || return 0
+  clone_url=$(clone_url_for "$1")
+  [ -z "${clone_url}" ] && return 0  # no validation if URL unknown
 
   local vdir="${WORK_ROOT}/validate-tmp"
   rm -rf "${vdir}"
 
-  # If version subdir exists, validate only that branch.
-  local patch_src="$1"
-  if [ -n "$3" ] && [ -d "$1/$3" ]; then
-    patch_src="$1/$3"
+  local patch_src="$2"
+  if [ -n "$3" ] && [ -d "$2/$3" ]; then
+    patch_src="$2/$3"
     git clone --depth 1 --branch "$3" "${clone_url}" "${vdir}" || return 1
   else
     git clone --depth 1 "${clone_url}" "${vdir}" || return 1
@@ -182,6 +206,9 @@ fi
 echo "Targets to fix:"
 cat "${TARGETS_FILE}"
 
+# Capture base ref once — every target branches off the same starting commit.
+base_ref=$(git -C "${SRC_ROOT}" rev-parse HEAD)
+
 while IFS='|' read -r integration version; do
   [ -z "${integration}" ] && continue
   patch_dir="${INTEGRATION_DIR}/${integration}_patch"
@@ -191,34 +218,38 @@ while IFS='|' read -r integration version; do
   target="${integration}${version:+-${version}}"
   branch_name="autofix/${target}"
   work_dir="${WORK_ROOT}/${target}"
+  retry_file="${work_dir}/retry-context.txt"
+  mkdir -p "${work_dir}"
+  rm -f "${retry_file}"
 
-  base_ref=$(git -C "${SRC_ROOT}" rev-parse HEAD)
   git -C "${SRC_ROOT}" branch -D "${branch_name}" 2>/dev/null || true
   git -C "${SRC_ROOT}" checkout -B "${branch_name}" "${base_ref}"
   fetch_logs "${integration}" "${work_dir}/logs"
 
   fixed=false
-  validation_error=""
   for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
     echo "=== ${target}: attempt ${attempt}/${MAX_ATTEMPTS} ==="
     prompt=$(build_prompt "${integration}" "${version}" "${patch_dir}" "${runner_script}" \
-      "${work_dir}/logs" "${branch_name}" "${validation_error}")
+      "${work_dir}/logs" "${branch_name}" "${retry_file}")
     if ! run_claude "${prompt}" "${work_dir}/claude-${attempt}.log"; then
       echo "::warning::Claude failed on attempt ${attempt}; retrying..."
       git -C "${SRC_ROOT}" reset --hard "${base_ref}"
-      validation_error=""
+      rm -f "${retry_file}"
       continue
     fi
     # Claude succeeded — validate the patches ourselves.
-    if validation_error=$(validate_patches "${patch_dir}" "${runner_script}" "${version}" 2>&1); then
+    if validation_output=$(validate_patches "${integration}" "${patch_dir}" "${version}" 2>&1); then
       fixed=true
       break
     fi
     echo "::warning::Patch validation failed on attempt ${attempt}; retrying..."
-    echo "${validation_error}"
-    validation_error="IMPORTANT: Your patches FAILED independent validation:
-${validation_error}
-Fix the patches so they apply cleanly with zero fuzz and zero rejects."
+    echo "${validation_output}"
+    {
+      echo "IMPORTANT: Your previous patches FAILED independent validation:"
+      echo "${validation_output}"
+      echo ""
+      echo "Fix the patches so they apply cleanly with zero fuzz and zero rejects."
+    } > "${retry_file}"
     git -C "${SRC_ROOT}" reset --hard "${base_ref}"
   done
 

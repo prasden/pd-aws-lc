@@ -312,7 +312,12 @@ discover_targets() {
 
 # ---------- Main --------------------------------------------------------------
 
-mode="${1:?Usage: $0 {discover <run_id> | fix <integration> <version> <run_id>}}"
+if [[ -z "${1:-}" ]]; then
+  echo "Usage: $0 discover <run_id>" >&2
+  echo "       $0 fix <integration> <version> <run_id>" >&2
+  exit 1
+fi
+mode="$1"
 shift
 
 case "${mode}" in
@@ -329,7 +334,8 @@ case "${mode}" in
     ;;
   *)
     echo "Unknown mode: ${mode}" >&2
-    echo "Usage: $0 {discover <run_id> | fix <integration> <version> <run_id>}" >&2
+    echo "Usage: $0 discover <run_id>" >&2
+    echo "       $0 fix <integration> <version> <run_id>" >&2
     exit 1
     ;;
 esac

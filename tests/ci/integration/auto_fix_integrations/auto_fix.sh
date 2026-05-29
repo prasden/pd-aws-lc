@@ -140,13 +140,13 @@ validate_patches() {
   local fails=0
   local patch_file
   while IFS= read -r patch_file; do
-    if ! patch --dry-run -p1 -d "${vdir}" < "${patch_file}" >/dev/null 2>&1; then
+    if ! patch --dry-run -p1 -d "${validation_directory}" < "${patch_file}" >/dev/null 2>&1; then
       echo "FAIL: $(basename "${patch_file}")"
       fails=$((fails + 1))
     fi
   done < <(find -L "${patch_src}" -type f -name '*.patch')
 
-  rm -rf "${vdir}"
+  rm -rf "${validation_directory}"
   [[ "${fails}" -eq 0 ]]
 }
 
@@ -282,53 +282,54 @@ fix_target() {
 }
 
 
+# Discover failed jobs and emit a deduped JSON array of targets.
+# Output: ["mariadb|", "nmap|", "python|3.13"]
+discover_targets() {
+  echo "Fetching failed jobs from run ${RUN_ID}..." >&2
+
+  local failed_jobs_file="${WORK_ROOT}/failed-jobs.txt"
+  gh api "/repos/${SOURCE_REPO}/actions/runs/${RUN_ID}/jobs" --paginate \
+    --jq '.jobs[]
+          | select(.conclusion == "failure" and .name != "report-failures" and .name != "autofix")
+          | .name' \
+    > "${failed_jobs_file}"
+
+  local targets_file="${WORK_ROOT}/targets.txt"
+  : > "${targets_file}"
+
+  local job
+  while IFS= read -r job; do
+    [[ -z "${job}" ]] && continue
+    classify_job "${job}" >> "${targets_file}" || true
+  done < "${failed_jobs_file}"
+
+  sort -u -o "${targets_file}" "${targets_file}"
+
+  # Emit JSON array (empty array if no targets).
+  jq -R -s -c 'split("\n") | map(select(length > 0))' "${targets_file}"
+}
+
+
 # ---------- Main --------------------------------------------------------------
 
-setup "$1"
+mode="${1:?Usage: $0 {discover <run_id> | fix <integration> <version> <run_id>}}"
+shift
 
-# 1. Discover failed jobs.
-echo "Fetching failed jobs from run ${RUN_ID}..."
-FAILED_JOBS_FILE="${WORK_ROOT}/failed-jobs.txt"
-gh api "/repos/${SOURCE_REPO}/actions/runs/${RUN_ID}/jobs" --paginate \
-  --jq '.jobs[]
-        | select(.conclusion == "failure" and .name != "report-failures" and .name != "autofix")
-        | .name' \
-  > "${FAILED_JOBS_FILE}"
-
-if [[ ! -s "${FAILED_JOBS_FILE}" ]]; then
-  echo "No failed jobs; nothing to autofix."
-  exit 0
-fi
-cat "${FAILED_JOBS_FILE}"
-
-# 2. Map failed jobs to unique (integration, version) targets.
-# Multiple jobs (e.g. python-3.13-fips-..., python-3.13-crt-...) collapse to
-# a single fix.
-TARGETS_FILE="${WORK_ROOT}/targets.txt"
-: > "${TARGETS_FILE}"
-
-while IFS= read -r job; do
-  [[ -z "${job}" ]] && continue
-  classify_job "${job}" >> "${TARGETS_FILE}" || true
-done < "${FAILED_JOBS_FILE}"
-
-sort -u -o "${TARGETS_FILE}" "${TARGETS_FILE}"
-
-if [[ ! -s "${TARGETS_FILE}" ]]; then
-  echo "No failed jobs map to a known patch directory."
-  exit 0
-fi
-echo "Targets to fix:"
-cat "${TARGETS_FILE}"
-
-# 3. For each target: attempt the fix, validate, push, open PR.
-# All targets branch from the same starting commit (this run's HEAD).
-BASE_REF=$(git -C "${SRC_ROOT}" rev-parse HEAD)
-
-while IFS='|' read -r integration version; do
-  [[ -z "${integration}" ]] && continue
-  fix_target "${integration}" "${version}" "${BASE_REF}"
-done < "${TARGETS_FILE}"
-
-echo "Autofix complete."
-exit 0
+case "${mode}" in
+  discover)
+    setup "$1"
+    discover_targets
+    ;;
+  fix)
+    integration="$1"
+    version="$2"
+    setup "$3"
+    base_ref=$(git -C "${SRC_ROOT}" rev-parse HEAD)
+    fix_target "${integration}" "${version}" "${base_ref}"
+    ;;
+  *)
+    echo "Unknown mode: ${mode}" >&2
+    echo "Usage: $0 {discover <run_id> | fix <integration> <version> <run_id>}" >&2
+    exit 1
+    ;;
+esac

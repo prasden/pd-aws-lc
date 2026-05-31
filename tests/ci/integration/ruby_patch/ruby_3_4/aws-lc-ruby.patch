@@ -18,16 +18,16 @@ index 1eb0f95..2b0a39a 100644
 -#elif defined(OPENSSL_FIPS)
 +#elif defined(OPENSSL_FIPS) || defined(OPENSSL_IS_AWSLC)
      if (RTEST(enabled)) {
-     int mode = FIPS_mode();
-     if(!mode && !FIPS_mode_set(1)) /* turning on twice leads to an error */
+ 	int mode = FIPS_mode();
+ 	if(!mode && !FIPS_mode_set(1)) /* turning on twice leads to an error */
 @@ -1113,6 +1113,8 @@ Init_openssl(void)
                      Qtrue
  #elif defined(OPENSSL_FIPS)
-              Qtrue
-+#elif defined(OPENSSL_IS_AWSLC) // AWS-LC FIPS can only be enabled during compile time.
-+            FIPS_mode() ? Qtrue : Qfalse
+ 		    Qtrue
++#elif defined(OPENSSL_IS_AWSLC) /* AWS-LC FIPS can only be enabled during compile time. */
++		    FIPS_mode() ? Qtrue : Qfalse
  #else
-              Qfalse
+ 		    Qfalse
  #endif
 diff --git ruby/ext/openssl/ossl_pkcs12.c ruby/ext/openssl/ossl_pkcs12.c
 index bda90ae..5042b2d 100644
@@ -64,7 +64,7 @@ index 9852be6..f970b06 100644
 --- ruby/ext/openssl/ossl_pkey_ec.c
 +++ ruby/ext/openssl/ossl_pkey_ec.c
 @@ -657,8 +657,11 @@ static VALUE ossl_ec_group_initialize(int argc, VALUE *argv, VALUE self)
-          ossl_clear_error(); /* ignore errors in d2i_ECPKParameters_bio() */
+ 		ossl_clear_error(); /* ignore errors in d2i_ECPKParameters_bio() */
                  if (nid == NID_undef)
                      ossl_raise(eEC_GROUP, "unknown curve name (%"PRIsVALUE")", arg1);
 -
@@ -85,9 +85,9 @@ index 9852be6..f970b06 100644
      if (EC_POINT_make_affine(group, point, ossl_bn_ctx) != 1)
          ossl_raise(eEC_POINT, "EC_POINT_make_affine");
  #endif
-@@ -1516,7 +1519,7 @@ static VALUE ossl_ec_point_mul(int argc, VALUE *argv, VALUE self)
-     if (EC_POINT_mul(group, point_result, bn_g, point_self, bn, ossl_bn_ctx) != 1)
-         ossl_raise(eEC_POINT, NULL);
+@@ -1518,7 +1521,7 @@ static VALUE ossl_ec_point_mul(int argc, VALUE *argv, VALUE self)
+ 	if (EC_POINT_mul(group, point_result, bn_g, point_self, bn, ossl_bn_ctx) != 1)
+ 	    ossl_raise(eEC_POINT, NULL);
      } else {
 -#if (defined(OPENSSL_VERSION_MAJOR) && OPENSSL_VERSION_MAJOR >= 3) || defined(LIBRESSL_VERSION_NUMBER)
 +#if (defined(OPENSSL_VERSION_MAJOR) && OPENSSL_VERSION_MAJOR >= 3) || defined(LIBRESSL_VERSION_NUMBER) || defined(OPENSSL_IS_AWSLC)

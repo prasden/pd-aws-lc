@@ -413,6 +413,28 @@ jobs:
           run: |
             source /opt/compiler-env/setup-${{ matrix.compiler }}.sh
             ${{ matrix.run }}
+      - name: Parse autofix target
+        id: autofix
+        if: failure() && github.event_name == 'schedule'
+        shell: bash
+        run: |
+          # All integration runners follow this format: ./tests/ci/integration/run_<name>_integration.sh [<version>]
+          read -r script_path version _ <<< "$run_command"
+          name=${script_path##*/}        # strip path
+          name=${name%.sh}               # strip .sh
+          name=${name#run_}              # strip run_ prefix
+          name=${name%_integration}      # strip _integration suffix
+          version=${version//[\'\"]/}    # strip quotes
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+        env:
+          run_command: ${{ matrix.run }}
+      - if: failure() && github.event_name == 'schedule'
+        uses: ./.github/actions/emit-autofix-target
+        with:
+          integration: ${{ steps.autofix.outputs.name }}
+          version: ${{ steps.autofix.outputs.version }}
+          artifact-suffix: ${{ matrix.name }}-${{ matrix.arch }}
 
   python:
     name: python-${{ matrix.version }}${{ matrix.buildFIPS == 1 && '-fips' || '' }}-${{ matrix.crtUseSystemCrypto == 1 && 'crt-vendored-crypto' || 'crt-system-crypto' }}-${{ matrix.arch }}
@@ -457,6 +479,12 @@ jobs:
           run: |
             source /opt/compiler-env/setup-gcc-12.sh
             ./tests/ci/integration/run_python_integration.sh ${{ matrix.version }}
+      - if: failure() && github.event_name == 'schedule'
+        uses: ./.github/actions/emit-autofix-target
+        with:
+          integration: python
+          version: ${{ matrix.version }}
+          artifact-suffix: python-${{ matrix.version }}-${{ matrix.buildFIPS }}-${{ matrix.crtUseSystemCrypto }}-${{ matrix.arch }}
 
   ruby:
     name: ruby-${{ matrix.version }}${{ matrix.buildFIPS == 1 && '-fips' || '' }}-${{ matrix.arch }}
@@ -491,6 +519,12 @@ jobs:
           run: |
             source /opt/compiler-env/setup-gcc-13.sh
             ./tests/ci/integration/run_ruby_integration.sh ${{ matrix.version }}
+      - if: failure() && github.event_name == 'schedule'
+        uses: ./.github/actions/emit-autofix-target
+        with:
+          integration: ruby
+          version: ${{ matrix.version }}
+          artifact-suffix: ruby-${{ matrix.version }}-${{ matrix.buildFIPS }}-${{ matrix.arch }}
 
   report-failures:
     name: report-failures

@@ -25,6 +25,7 @@ env:
   TARGET_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
   GITHUB_REPO_OWNER: aws
   GITHUB_REPO_NAME: aws-lc
+  AUTOFIX_SCRIPT: ./tests/ci/integration/auto_fix_integrations/auto_fix.sh
 
 jobs:
   discover:
@@ -49,19 +50,16 @@ jobs:
       - name: Fetch GitHub token from Secrets Manager
         run: |
           set -eo pipefail
-          secret=$(aws secretsmanager get-secret-value \
-            --region us-west-2 \
-            --secret-id aws-lc/ci/github/token \
-            --query SecretString --output text)
-          token=$(echo "$secret" | jq -r '.Token')
+          token=$(aws secretsmanager get-secret-value --region us-west-2 \
+            --secret-id aws-lc/ci/github/token --query SecretString --output text \
+            | jq -r '.Token')
           echo "::add-mask::$token"
           echo "GH_TOKEN=$token" >> "$GITHUB_ENV"
-      - name: Discover targets
-        id: discover
+      - id: discover
         run: |
           set -eo pipefail
-          chmod +x ./tests/ci/integration/auto_fix_integrations/auto_fix.sh
-          targets=$(./tests/ci/integration/auto_fix_integrations/auto_fix.sh discover "$TARGET_RUN_ID")
+          chmod +x "$AUTOFIX_SCRIPT"
+          targets=$("$AUTOFIX_SCRIPT" discover "$TARGET_RUN_ID")
           echo "Targets: $targets"
           echo "targets=$targets" >> "$GITHUB_OUTPUT"
 
@@ -77,6 +75,12 @@ jobs:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
         image:linux-5.0
         instance-size:small
+    env:
+      CLAUDE_CODE_USE_BEDROCK: "1"
+      AWS_REGION: us-west-2
+      ANTHROPIC_DEFAULT_OPUS_MODEL: us.anthropic.claude-opus-4-6-v1
+      ANTHROPIC_DEFAULT_SONNET_MODEL: us.anthropic.claude-sonnet-4-6
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: us.anthropic.claude-haiku-4-5-20251001-v1:0
     steps:
       - uses: actions/checkout@v6
         with:
@@ -84,31 +88,17 @@ jobs:
       - uses: ./.github/actions/configure-aws-credentials
         with:
           roleName: AwsLcIntegrationAutofixRole
-      - name: Install Claude Code CLI
-        run: |
-          set -exo pipefail
-          npm install -g @anthropic-ai/claude-code
-          claude --version
       - name: Fetch GitHub token from Secrets Manager
         run: |
           set -eo pipefail
-          secret=$(aws secretsmanager get-secret-value \
-            --region us-west-2 \
-            --secret-id aws-lc/ci/github/token \
-            --query SecretString --output text)
-          token=$(echo "$secret" | jq -r '.Token')
+          token=$(aws secretsmanager get-secret-value --region us-west-2 \
+            --secret-id aws-lc/ci/github/token --query SecretString --output text \
+            | jq -r '.Token')
           echo "::add-mask::$token"
           echo "GH_TOKEN=$token" >> "$GITHUB_ENV"
-      - name: Run autofix for ${{ matrix.target }}
-        env:
-          CLAUDE_CODE_USE_BEDROCK: "1"
-          AWS_REGION: us-west-2
-          ANTHROPIC_DEFAULT_OPUS_MODEL: us.anthropic.claude-opus-4-6-v1
-          ANTHROPIC_DEFAULT_SONNET_MODEL: us.anthropic.claude-sonnet-4-6
-          ANTHROPIC_DEFAULT_HAIKU_MODEL: us.anthropic.claude-haiku-4-5-20251001-v1:0
-        run: |
+      - run: npm install -g @anthropic-ai/claude-code
+      - run: |
           set -exo pipefail
-          chmod +x ./tests/ci/integration/auto_fix_integrations/auto_fix.sh
-          # Matrix target is "integration|version"; split on the pipe.
+          chmod +x "$AUTOFIX_SCRIPT"
           IFS='|' read -r integration version <<< "${{ matrix.target }}"
-          ./tests/ci/integration/auto_fix_integrations/auto_fix.sh fix "$integration" "$version" "$TARGET_RUN_ID"
+          "$AUTOFIX_SCRIPT" fix "$integration" "$version" "$TARGET_RUN_ID"

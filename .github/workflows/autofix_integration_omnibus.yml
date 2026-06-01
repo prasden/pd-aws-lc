@@ -47,14 +47,7 @@ jobs:
       - uses: ./.github/actions/configure-aws-credentials
         with:
           roleName: AwsLcIntegrationAutofixRole
-      - name: Fetch GitHub token from Secrets Manager
-        run: |
-          set -eo pipefail
-          token=$(aws secretsmanager get-secret-value --region us-west-2 \
-            --secret-id aws-lc/ci/github/token --query SecretString --output text \
-            | jq -r '.Token')
-          echo "::add-mask::$token"
-          echo "GH_TOKEN=$token" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/fetch-github-token
       - id: discover
         run: |
           set -eo pipefail
@@ -89,14 +82,7 @@ jobs:
       - uses: ./.github/actions/configure-aws-credentials
         with:
           roleName: AwsLcIntegrationAutofixRole
-      - name: Fetch GitHub token from Secrets Manager
-        run: |
-          set -eo pipefail
-          token=$(aws secretsmanager get-secret-value --region us-west-2 \
-            --secret-id aws-lc/ci/github/token --query SecretString --output text \
-            | jq -r '.Token')
-          echo "::add-mask::$token"
-          echo "GH_TOKEN=$token" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/fetch-github-token
       - run: npm install -g @anthropic-ai/claude-code
       - run: |
           set -exo pipefail

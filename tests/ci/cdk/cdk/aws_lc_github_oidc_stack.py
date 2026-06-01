@@ -300,9 +300,12 @@ def create_autofix_role(scope: Construct, id: str,
                                         "bedrock:InvokeModelWithResponseStream",
                                     ],
                                     resources=[
-                                        "arn:aws:bedrock:*:*:foundation-model/*",
-                                        "arn:aws:bedrock:*:*:inference-profile/*",
-                                        "arn:aws:bedrock:*:*:application-inference-profile/*",
+                                        # Cross-region inference profiles (us.anthropic.*) route to any us-*
+                                        # region; the IAM policy must allow the foundation model in every
+                                        # destination region, so leave the region wildcard here.
+                                        "arn:aws:bedrock:*::foundation-model/*",
+                                        f"arn:aws:bedrock:{env.region}:{env.account}:inference-profile/*",
+                                        f"arn:aws:bedrock:{env.region}:{env.account}:application-inference-profile/*",
                                     ],
                                 ),
                             ]

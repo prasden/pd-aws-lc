@@ -11,8 +11,8 @@ inputs:
     description: 'Version/branch the runner ran with (empty for flat patch dirs).'
     required: false
     default: ''
-  artifact-suffix:
-    description: 'Unique suffix for the artifact name to avoid collisions across matrix entries.'
+  failed-integration:
+    description: 'Identifier for the failing matrix row (e.g. "postgresql-x86_64"). Used to keep artifact names unique across the matrix.'
     required: true
 runs:
   using: 'composite'
@@ -21,5 +21,5 @@ runs:
       run: printf '%s\t%s\n' "${{ inputs.integration }}" "${{ inputs.version }}" > autofix-target.txt
     - uses: actions/upload-artifact@v4
       with:
-        name: autofix-target-${{ inputs.artifact-suffix }}
+        name: autofix-target-${{ inputs.failed-integration }}
         path: autofix-target.txt

@@ -4,10 +4,8 @@
 #
 # Drives the autofix loop for failed integration tests. Two modes:
 #   discover  - read the (integration, version) targets emitted by failed
-#               omnibus jobs and print them as a JSON array
-#   fix       - for one target, ask Claude (via Bedrock) to repair the patch
-#               and, if it commits a fix, open a draft PR. Claude validates the
-#               patch with `patch --dry-run`; the draft PR's CI is the backstop.
+#               integration omnibus jobs and print them as a JSON array
+#   fix       - ask Claude to attempt a fix and create a PR for a target.
 
 set -euo pipefail
 
@@ -15,13 +13,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 
 
-# ---------- Setup -------------------------------------------------------------
 
 setup() {
   RUN_ID="${1:?Usage: $0 <integration_omnibus_run_id>}"
-  SOURCE_REPO="${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}"
-  TARGET_REPO="${AUTOFIX_TARGET_REPO:-$(git -C "${SRC_ROOT}" remote get-url origin \
-    | sed -E 's#(https://github.com/|git@github.com:)([^/]+/[^/.]+)(\.git)?#\2#')}"
+  REPO="${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}"
   INTEGRATION_DIR="${SRC_ROOT}/tests/ci/integration"
   WORK_ROOT="${SRC_ROOT}/.autofix-workspace"
   MAX_ATTEMPTS=3
@@ -39,9 +34,8 @@ setup() {
 }
 
 
-# ---------- Helpers -----------------------------------------------------------
-
-# Fetch the last 200 lines of each failed job's log into the given directory.
+# Fetch the last 200 lines of each failed job's log into the given directory 
+# to feed as extra context to Claude when it attempts a fix.
 # Args: $1 = integration name, $2 = output directory
 fetch_logs() {
   local integration="$1"
@@ -51,18 +45,17 @@ fetch_logs() {
   mkdir -p "${logs_dir}"
 
   local job_id
-  for job_id in $(gh api "/repos/${SOURCE_REPO}/actions/runs/${RUN_ID}/jobs" \
+  for job_id in $(gh api "/repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
                     --paginate \
                     --jq ".jobs[]
                           | select(.conclusion == \"failure\" and (.name | startswith(\"${prefix}\")))
                           | .id")
   do
-    gh api "/repos/${SOURCE_REPO}/actions/jobs/${job_id}/logs" \
+    gh api "/repos/${REPO}/actions/jobs/${job_id}/logs" \
       | tail -n 200 > "${logs_dir}/${job_id}.log" || true
   done
 }
 
-# Render the prompt template with the given context.
 build_prompt() {
   local integration="$1"
   local version="$2"
@@ -77,7 +70,7 @@ build_prompt() {
       -e "s|RUNNER_SCRIPT_PLACEHOLDER|${runner_script}|g" \
       -e "s|LOGS_DIR_PLACEHOLDER|${logs_dir}|g" \
       -e "s|BRANCH_NAME_PLACEHOLDER|${branch_name}|g" \
-      -e "s|FAILING_RUN_PLACEHOLDER|https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}|g" \
+      -e "s|FAILING_RUN_PLACEHOLDER|https://github.com/${REPO}/actions/runs/${RUN_ID}|g" \
       -e "s|SRC_ROOT_PLACEHOLDER|${SRC_ROOT}|g" \
       -e "s|WORK_ROOT_PLACEHOLDER|${WORK_ROOT}|g" \
       -e "s|RUN_ID_PLACEHOLDER|${RUN_ID}|g" \
@@ -85,35 +78,28 @@ build_prompt() {
 }
 
 run_claude() {
-  local prompt="$1"
-  local log_file="$2"
-
-  set +e
-  timeout "${CLAUDE_TIMEOUT}" claude -p "${prompt}" \
+  local rc=0
+  timeout "${CLAUDE_TIMEOUT}" claude -p "$1" \
     --allowedTools "Read,Glob,Grep,Bash,Edit,Write,Agent,WebFetch" \
-    --verbose > "${log_file}"
-  local rc=$?
-  set -e
+    --verbose > "$2" || rc=$?
 
-  if [[ "${rc}" -eq 124 ]]; then
-    echo "::warning::Claude timed out after ${CLAUDE_TIMEOUT}s."
-  elif [[ "${rc}" -ne 0 ]]; then
-    echo "::warning::Claude exited with code ${rc}."
-  fi
-
+  case "${rc}" in
+    0)   ;;
+    124) echo "::warning::Claude timed out after ${CLAUDE_TIMEOUT}s." ;;
+    *)   echo "::warning::Claude exited with code ${rc}." ;;
+  esac
   return "${rc}"
 }
 
 # Push the fix branch and open the draft PR. If the branch already exists on
-# the remote, an autofix PR is already open; oncall will merge or close it,
-# which deletes the branch and lets the next nightly run try again.
+# the remote, deletes the branch and lets the next nightly run try again.
 open_pr() {
   local target="$1"
   local branch_name="$2"
-  local push_url="https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git"
+  local push_url="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
 
   if git -C "${SRC_ROOT}" ls-remote --exit-code "${push_url}" "refs/heads/${branch_name}" >/dev/null 2>&1; then
-    echo "Branch ${branch_name} already exists on ${TARGET_REPO}; skipping push (existing PR is still open)."
+    echo "Branch ${branch_name} already exists on ${REPO}; skipping push (existing PR is still open)."
     return
   fi
 
@@ -122,11 +108,11 @@ open_pr() {
   local pr_body
   pr_body="$(git -C "${SRC_ROOT}" log -1 --format=%b)
 
----
-This PR was drafted automatically by the nightly autofix workflow using Claude Code. A maintainer should review and run CI before merging.
-Triggered by: https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}"
+  ---
+  This PR was drafted automatically by the nightly autofix workflow using Claude Code. A maintainer should review and run CI before merging.
+  Triggered by: https://github.com/${REPO}/actions/runs/${RUN_ID}"
 
-  gh pr create --draft --repo "${TARGET_REPO}" \
+  gh pr create --draft --repo "${REPO}" \
     --head "${branch_name}" \
     --title "autofix(${target}): repair patch" \
     --body "${pr_body}"
@@ -147,7 +133,6 @@ fix_target() {
   local work_dir="${WORK_ROOT}/${target}"
   mkdir -p "${work_dir}"
 
-  # Start from a clean branch off the base commit.
   git -C "${SRC_ROOT}" checkout -B "${branch_name}" "${base_ref}"
 
   fetch_logs "${integration}" "${work_dir}/logs"
@@ -156,26 +141,22 @@ fix_target() {
   prompt=$(build_prompt "${integration}" "${version}" "${patch_dir}" \
                         "${runner_script}" "${work_dir}/logs" "${branch_name}")
 
-  # Claude validates patches with `patch --dry-run` before committing (see
-  # prompt.md). The draft PR's CI is the deterministic backstop. We retry only
-  # on transient Claude failures (timeout, non-zero exit). If Claude finishes
-  # cleanly without a commit, that's Claude declining the fix — retrying with
-  # the same prompt won't change the answer.
-  for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
+  # Retry on transient Claude failures (timeout, non-zero exit). A clean Claude
+  # exit with no commit means Claude declined the fix — don't retry.
+  for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
     echo "=== ${target}: attempt ${attempt}/${MAX_ATTEMPTS} ==="
     git -C "${SRC_ROOT}" reset --hard "${base_ref}"
-    if ! run_claude "${prompt}" "${work_dir}/claude-${attempt}.log"; then
-      continue  # transient failure — try again
-    fi
-    if [[ "$(git -C "${SRC_ROOT}" rev-parse HEAD)" != "${base_ref}" ]]; then
-      open_pr "${target}" "${branch_name}"
+    run_claude "${prompt}" "${work_dir}/claude-${attempt}.log" || continue
+
+    if [[ "$(git -C "${SRC_ROOT}" rev-parse HEAD)" == "${base_ref}" ]]; then
+      echo "::warning::${target}: Claude declined the fix; not retrying."
       return
     fi
-    echo "::warning::${target}: Claude produced no commit; declining further attempts."
+    open_pr "${target}" "${branch_name}"
     return
   done
 
-  echo "::warning::Could not fix ${target} after ${MAX_ATTEMPTS} transient failures."
+  echo "::warning::${target}: ${MAX_ATTEMPTS} transient Claude failures; giving up."
 }
 
 
@@ -192,7 +173,7 @@ discover_targets() {
   # gh run download exits non-zero both when no artifacts match (legitimate:
   # the run had no failures) and on real errors (auth, expired run, API down).
   # Differentiate by inspecting stderr so genuine failures aren't silenced.
-  if ! gh run download "${RUN_ID}" --repo "${SOURCE_REPO}" \
+  if ! gh run download "${RUN_ID}" --repo "${REPO}" \
          --pattern 'autofix-target-*' --dir "${targets_dir}" 2>"${download_log}"; then
     if grep -q "no artifacts found" "${download_log}"; then
       echo "No autofix-target artifacts in run ${RUN_ID} (run had no failures)." >&2
@@ -207,8 +188,8 @@ discover_targets() {
   while IFS=$'\t' read -r integration version _; do
     [[ -z "${integration}" ]] && continue
     patch_dir="${INTEGRATION_DIR}/${integration}_patch"
-    # Skip integrations with no patch directory at all.
     [[ -d "${patch_dir}" ]] || continue
+    
     # If a version was reported, skip when the patch dir has version subdirs
     # but none match this version (e.g. python|main, ruby|master, openvpn|master).
     if [[ -n "${version}" && ! -d "${patch_dir}/${version}" ]]; then
@@ -227,13 +208,6 @@ discover_targets() {
 }
 
 
-# ---------- Main --------------------------------------------------------------
-
-if [[ -z "${1:-}" ]]; then
-  echo "Usage: $0 discover <run_id>" >&2
-  echo "       $0 fix <integration> <version> <run_id>" >&2
-  exit 1
-fi
 mode="$1"
 shift
 
@@ -248,11 +222,5 @@ case "${mode}" in
     setup "$3"
     base_ref=$(git -C "${SRC_ROOT}" rev-parse HEAD)
     fix_target "${integration}" "${version}" "${base_ref}"
-    ;;
-  *)
-    echo "Unknown mode: ${mode}" >&2
-    echo "Usage: $0 discover <run_id>" >&2
-    echo "       $0 fix <integration> <version> <run_id>" >&2
-    exit 1
     ;;
 esac

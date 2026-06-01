@@ -6,6 +6,7 @@ on:
     branches: [ '*' ]
   schedule:
     - cron: "0 0 * * *"
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
   cancel-in-progress: true
@@ -418,7 +419,7 @@ jobs:
       # doesn't always match the  patch directory ("postgres_patch"), so the runner script path is the source of truth.
       - name: Get failed integration name and version
         id: autofix-target
-        if: failure() && github.event_name == 'schedule'
+        if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         shell: bash
         run: |
           # Runner format: ./tests/ci/integration/run_<integration>_integration.sh [<version>]
@@ -449,7 +450,7 @@ jobs:
       # autofix-integration-omnibus workflow (triggered by workflow_run when
       # this run completes) can download every failed target and autofix per (integration, version).
       - name: Upload failed integration target
-        if: failure() && github.event_name == 'schedule'
+        if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         uses: ./.github/actions/emit-autofix-target
         with:
           integration: ${{ steps.autofix-target.outputs.integration }}
@@ -499,7 +500,7 @@ jobs:
           run: |
             source /opt/compiler-env/setup-gcc-12.sh
             ./tests/ci/integration/run_python_integration.sh ${{ matrix.version }}
-      - if: failure() && github.event_name == 'schedule'
+      - if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         uses: ./.github/actions/emit-autofix-target
         with:
           integration: python
@@ -539,7 +540,7 @@ jobs:
           run: |
             source /opt/compiler-env/setup-gcc-13.sh
             ./tests/ci/integration/run_ruby_integration.sh ${{ matrix.version }}
-      - if: failure() && github.event_name == 'schedule'
+      - if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         uses: ./.github/actions/emit-autofix-target
         with:
           integration: ruby

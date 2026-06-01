@@ -23,8 +23,8 @@ permissions:
 
 env:
   TARGET_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
-  GITHUB_REPO_OWNER: aws
-  GITHUB_REPO_NAME: aws-lc
+  GITHUB_REPO_OWNER: prasden
+  GITHUB_REPO_NAME: pd-aws-lc
   AUTOFIX_SCRIPT: ./tests/ci/integration/auto_fix_integrations/auto_fix.sh
 
 jobs:

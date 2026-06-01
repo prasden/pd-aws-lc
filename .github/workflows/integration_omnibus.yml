@@ -419,12 +419,17 @@ jobs:
         shell: bash
         run: |
           # All integration runners follow this format: ./tests/ci/integration/run_<name>_integration.sh [<version>]
-          read -r script_path version _ <<< "$run_command"
+          # Loop through all lines so multi-line `run:` blocks (e.g. bind9) land on the runner invocation.
+          while read -r line_path line_ver _; do
+            [[ -n "$line_path" ]] && script_path="$line_path" version="$line_ver"
+          done <<< "$run_command"
           name=${script_path##*/}        # strip path
           name=${name%.sh}               # strip .sh
           name=${name#run_}              # strip run_ prefix
           name=${name%_integration}      # strip _integration suffix
           version=${version//[\'\"]/}    # strip quotes
+          # openssh reads its branch from OPENSSH_BRANCH env, not a positional arg.
+          [[ -z "$version" && "$name" == "openssh" ]] && version="$OPENSSH_BRANCH"
           echo "name=$name" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
         env:

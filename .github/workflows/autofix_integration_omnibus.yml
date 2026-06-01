@@ -69,6 +69,7 @@ jobs:
     if: needs.discover.outputs.targets != '[]' && needs.discover.outputs.targets != ''
     strategy:
       fail-fast: false
+      max-parallel: 5
       matrix:
         target: ${{ fromJSON(needs.discover.outputs.targets) }}
     runs-on:
@@ -100,5 +101,7 @@ jobs:
       - run: |
           set -exo pipefail
           chmod +x "$AUTOFIX_SCRIPT"
-          IFS='|' read -r integration version <<< "${{ matrix.target }}"
+          IFS='|' read -r integration version <<< "$TARGET"
           "$AUTOFIX_SCRIPT" fix "$integration" "$version" "$TARGET_RUN_ID"
+        env:
+          TARGET: ${{ matrix.target }}

@@ -104,21 +104,20 @@ run_claude() {
   return "${rc}"
 }
 
-# Push the fix branch and open (or update) the draft PR.
+# Push the fix branch and open the draft PR. If the branch already exists on
+# the remote, an autofix PR is already open; oncall will merge or close it,
+# which deletes the branch and lets the next nightly run try again.
 open_pr() {
   local target="$1"
   local branch_name="$2"
   local push_url="https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git"
 
-  # Skip if the remote branch already has the same changes (avoids re-pushing
-  # identical fixes night after night).
-  if git -C "${SRC_ROOT}" fetch "${push_url}" "${branch_name}" 2>/dev/null \
-     && git -C "${SRC_ROOT}" diff --quiet FETCH_HEAD HEAD; then
-    echo "No new changes for ${target}; skipping push."
+  if git -C "${SRC_ROOT}" ls-remote --exit-code "${push_url}" "refs/heads/${branch_name}" >/dev/null 2>&1; then
+    echo "Branch ${branch_name} already exists on ${TARGET_REPO}; skipping push (existing PR is still open)."
     return
   fi
 
-  git -C "${SRC_ROOT}" push --force "${push_url}" "${branch_name}"
+  git -C "${SRC_ROOT}" push "${push_url}" "${branch_name}"
 
   local pr_body
   pr_body="$(git -C "${SRC_ROOT}" log -1 --format=%b)
@@ -130,8 +129,7 @@ Triggered by: https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}"
   gh pr create --draft --repo "${TARGET_REPO}" \
     --head "${branch_name}" \
     --title "autofix(${target}): repair patch" \
-    --body "${pr_body}" \
-    || true  # PR may already exist; that's fine.
+    --body "${pr_body}"
 }
 
 # Run the full fix-and-PR loop for one (integration, version) target.
@@ -150,7 +148,6 @@ fix_target() {
   mkdir -p "${work_dir}"
 
   # Start from a clean branch off the base commit.
-  git -C "${SRC_ROOT}" branch -D "${branch_name}" 2>/dev/null || true
   git -C "${SRC_ROOT}" checkout -B "${branch_name}" "${base_ref}"
 
   fetch_logs "${integration}" "${work_dir}/logs"
@@ -188,10 +185,22 @@ discover_targets() {
   echo "Downloading autofix targets from run ${RUN_ID}..." >&2
 
   local targets_dir="${WORK_ROOT}/targets"
+  local download_log="${WORK_ROOT}/gh-download.log"
   rm -rf "${targets_dir}"
   mkdir -p "${targets_dir}"
-  gh run download "${RUN_ID}" --repo "${SOURCE_REPO}" \
-    --pattern 'autofix-target-*' --dir "${targets_dir}" 2>/dev/null || true
+
+  # gh run download exits non-zero both when no artifacts match (legitimate:
+  # the run had no failures) and on real errors (auth, expired run, API down).
+  # Differentiate by inspecting stderr so genuine failures aren't silenced.
+  if ! gh run download "${RUN_ID}" --repo "${SOURCE_REPO}" \
+         --pattern 'autofix-target-*' --dir "${targets_dir}" 2>"${download_log}"; then
+    if grep -q "no artifacts found" "${download_log}"; then
+      echo "No autofix-target artifacts in run ${RUN_ID} (run had no failures)." >&2
+    else
+      echo "::error::gh run download failed: $(cat "${download_log}")" >&2
+      return 1
+    fi
+  fi
 
   local targets_file="${WORK_ROOT}/targets.txt"
   local integration version patch_dir
@@ -210,7 +219,7 @@ discover_targets() {
       [[ "${has_subdirs}" = "true" ]] && continue
     fi
     echo "${integration}|${version}"
-  done < <(cat "${targets_dir}"/*/autofix-target.txt 2>/dev/null) \
+  done < <(find "${targets_dir}" -type f -name autofix-target.txt -exec cat {} +) \
     | sort -u > "${targets_file}"
 
   # Emit JSON array (empty array if no targets).

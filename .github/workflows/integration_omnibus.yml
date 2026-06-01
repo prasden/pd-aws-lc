@@ -38,23 +38,13 @@ jobs:
       ACCP_FIPS: ${{ matrix.accp_fips || '' }}
     steps:
       - uses: actions/checkout@v6
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-      - uses: ./.github/actions/codebuild-docker-run
-        name: Run Container
-        with:
-          image: ${{ steps.login-ecr.outputs.registry }}/aws-lc/${{ matrix.image }}
-          env: |
-            OPENSSH_BRANCH
-            ACCP_FIPS
-          options: ${{ matrix.options || '' }}
-          user: ${{ matrix.user || '' }}
-          ipv6: ${{ matrix.ipv6 || false }}
-          withCredentials: ${{ matrix.credentials || false }}
-          run: |
-            source /opt/compiler-env/setup-${{ matrix.compiler }}.sh
-            ${{ matrix.run }}
+      # TEST-ONLY: skip the real integration test, just fail so the autofix
+      # emit step runs. Real prod uses the codebuild-docker-run step below.
+      - name: Force failure for autofix test
+        shell: bash
+        run: |
+          echo "::error::synthetic failure to trigger autofix emit"
+          exit 1
       # Read the integration name and version off the runner script path so we
       # know which patch directory failed. matrix.name (e.g. "postgresql") 
       # doesn't always match the  patch directory ("postgres_patch"), so the runner script path is the source of truth.

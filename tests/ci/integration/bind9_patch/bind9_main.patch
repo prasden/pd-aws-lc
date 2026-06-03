@@ -1,8 +1,8 @@
 diff --git a/tests/dns/dnstap_test.c b/tests/dns/dnstap_test.c
-index e39725f..8cbf833 100644
+index 94d1704..aa71ca6 100644
 --- a/tests/dns/dnstap_test.c
 +++ b/tests/dns/dnstap_test.c
-@@ -39,8 +39,8 @@
+@@ -40,8 +40,8 @@
  
  #include <tests/dns.h>
  

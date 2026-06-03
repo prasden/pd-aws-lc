@@ -29,7 +29,13 @@ readonly UNTRUSTED_DATA_PROMPT=\
 
 setup() {
   RUN_ID="${1:?Usage: $0 <integration_omnibus_run_id>}"
-  REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set; run inside GitHub Actions or export it manually.}"
+  # SOURCE_REPO is where we read failure data from (the failed run's repo).
+  # TARGET_REPO is where we push branches and open PRs.
+  # In prod they are the same. On the fork test branch SOURCE_REPO can be
+  # overridden to fetch real aws-lc failure runs while still pushing to the
+  # fork.
+  SOURCE_REPO="${AUTOFIX_SOURCE_REPO:-${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set; run inside GitHub Actions or export it manually.}}"
+  TARGET_REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set; run inside GitHub Actions or export it manually.}"
   mkdir -p "${WORK_ROOT}"
   git -C "${SRC_ROOT}" config user.email "aws-lc-ci@amazon.com"
   git -C "${SRC_ROOT}" config user.name  "AWS-LC CI Integration Resolver"
@@ -50,13 +56,13 @@ fetch_logs() {
   mkdir -p "${logs_dir}"
 
   local job_id
-  for job_id in $(gh api "/repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
+  for job_id in $(gh api "/repos/${SOURCE_REPO}/actions/runs/${RUN_ID}/jobs" \
                     --paginate \
                     --jq ".jobs[]
                           | select(.conclusion == \"failure\" and (.name | startswith(\"${prefix}\")))
                           | .id")
   do
-    gh api "/repos/${REPO}/actions/jobs/${job_id}/logs" \
+    gh api "/repos/${SOURCE_REPO}/actions/jobs/${job_id}/logs" \
       | tail -n 200 | sanitize_log > "${logs_dir}/${job_id}.log" || true
   done
 }
@@ -75,7 +81,7 @@ build_prompt() {
       -e "s|RUNNER_SCRIPT_PLACEHOLDER|${runner_script}|g" \
       -e "s|LOGS_DIR_PLACEHOLDER|${logs_dir}|g" \
       -e "s|BRANCH_NAME_PLACEHOLDER|${branch_name}|g" \
-      -e "s|FAILING_RUN_PLACEHOLDER|https://github.com/${REPO}/actions/runs/${RUN_ID}|g" \
+      -e "s|FAILING_RUN_PLACEHOLDER|https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}|g" \
       -e "s|SRC_ROOT_PLACEHOLDER|${SRC_ROOT}|g" \
       -e "s|WORK_ROOT_PLACEHOLDER|${WORK_ROOT}|g" \
       -e "s|RUN_ID_PLACEHOLDER|${RUN_ID}|g" \
@@ -111,11 +117,11 @@ scan_secrets() {
 open_pr() {
   local target="$1"
   local branch_name="$2"
-  local push_url="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+  local push_url="https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git"
 
   # Skip if the branch already exists.
   if git -C "${SRC_ROOT}" ls-remote --exit-code "${push_url}" "refs/heads/${branch_name}" >/dev/null 2>&1; then
-    echo "Branch ${branch_name} already exists on ${REPO}; skipping push (existing PR is still open)."
+    echo "Branch ${branch_name} already exists on ${TARGET_REPO}; skipping push (existing PR is still open)."
     return
   fi
 
@@ -129,9 +135,9 @@ This PR was drafted automatically by the nightly integration-resolver workflow u
 
 - Session: \`${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}\`
 - Generated: \`$(date -u +%Y-%m-%dT%H:%M:%SZ)\`
-- Triggered by: https://github.com/${REPO}/actions/runs/${RUN_ID}"
+- Triggered by: https://github.com/${SOURCE_REPO}/actions/runs/${RUN_ID}"
 
-  gh pr create --draft --repo "${REPO}" \
+  gh pr create --draft --repo "${TARGET_REPO}" \
     --head "${branch_name}" \
     --title "resolve(${target}): repair patch" \
     --body "${pr_body}"
@@ -212,7 +218,7 @@ recognize_targets() {
 
   # A run with no failures emits no autofix-target artifacts.
   local count
-  count=$(gh api "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
+  count=$(gh api "/repos/${SOURCE_REPO}/actions/runs/${RUN_ID}/artifacts" \
     --jq '[.artifacts[] | select(.name | startswith("autofix-target-"))] | length')
   if [[ "${count}" -eq 0 ]]; then
     echo "No autofix-target artifacts in run ${RUN_ID} (run had no failures)." >&2
@@ -220,7 +226,7 @@ recognize_targets() {
     return 0
   fi
 
-  gh run download "${RUN_ID}" --repo "${REPO}" \
+  gh run download "${RUN_ID}" --repo "${SOURCE_REPO}" \
     --pattern 'autofix-target-*' --dir "${targets_dir}"
 
   local integration version patch_dir

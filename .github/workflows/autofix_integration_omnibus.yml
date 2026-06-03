@@ -10,6 +10,11 @@ on:
         description: "GitHub Actions run ID of the integration-omnibus run to autofix"
         required: true
         type: string
+      omnibus_repo:
+        description: "Repo to fetch the failed run from (default: this repo)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -19,6 +24,14 @@ permissions:
 env:
   TARGET_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
   AUTOFIX_SCRIPT: ./tests/ci/integration/auto_fix_integrations/auto_fix.sh
+  # Where to read failure data from (logs + artifacts). When dispatched with
+  # omnibus_repo set (e.g. aws/aws-lc) we read from there but still push to
+  # this repo. Empty falls back to the runner's own repo.
+  AUTOFIX_SOURCE_REPO: ${{ inputs.omnibus_repo }}
+  # When dispatched manually with omnibus_repo set, fetch logs from there
+  # (e.g. aws/aws-lc) instead of the runner's own repo. Empty value falls
+  # back to the auto-set GITHUB_REPOSITORY.
+  GITHUB_REPOSITORY: ${{ inputs.omnibus_repo || github.repository }}
 
 jobs:
   recognize:

@@ -57,10 +57,10 @@ index 7fdd2be..7d8839f 100644
          server_context.minimum_version = ssl.TLSVersion.TLSv1_3
          server_context.set_ciphers('PSK')
          server_context.set_psk_server_callback(server_callback, identity_hint)
-@@ -4521,7 +4523,10 @@ def server_callback(identity):
-                 s.connect((HOST, server.port))
- 
- 
+@@ -4769,7 +4771,10 @@ def background(sock):
+                         raise cm.exc_value
+
+
 -@unittest.skipUnless(has_tls_version('TLSv1_3'), "Test needs TLS 1.3")
 +@unittest.skipUnless(
 +    has_tls_version('TLSv1_3') and not Py_OPENSSL_IS_AWSLC,

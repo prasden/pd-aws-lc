@@ -83,6 +83,27 @@ jobs:
         # if the unprivileged CodeBuild container can't run bubblewrap, Claude
         # falls back to unsandboxed and the permission allow list still applies.
         run: sudo dnf install -y bubblewrap socat || true
+      - name: Probe sandbox egress (must block non-allowlisted domains)
+        run: |
+          set -exo pipefail
+          rm -f probe_result.txt
+          # Runs INSIDE Claude's sandboxed Bash via the same settings file.
+          # example.com is not in allowedDomains: it must be unreachable.
+          timeout 120 claude -p \
+            'Using the Bash tool, run exactly this one command and then stop: curl -sS --max-time 8 https://example.com >/dev/null 2>&1 && echo PROBE_REACHED > probe_result.txt || echo PROBE_BLOCKED > probe_result.txt' \
+            --allowedTools "Bash" \
+            --settings "$SETTINGS" \
+            --verbose --output-format stream-json || true
+
+          echo "::group::probe result"; cat probe_result.txt 2>/dev/null || echo "(no result file)"; echo "::endgroup::"
+
+          if ! grep -q PROBE_BLOCKED probe_result.txt 2>/dev/null; then
+            echo "::error::Sandbox NOT enforcing egress (reached non-allowlisted host, or sandbox failed to init). curl/wget are open exfil channels."
+            exit 1
+          fi
+          echo "OK: sandbox blocked egress to non-allowlisted host."
+        env:
+          SETTINGS: ./tests/ci/integration/auto_fix_integrations/claude-settings.json
       - name: Fetch failed-job logs
         run: |
           set -exo pipefail

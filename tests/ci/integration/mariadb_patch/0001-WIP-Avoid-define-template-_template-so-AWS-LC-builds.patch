@@ -24,10 +24,10 @@ In file included from /usr/local/include/openssl/evp.h:60,
  2 files changed, 4 insertions(+), 2 deletions(-)
 
 diff --git a/include/violite.h b/include/violite.h
-index b823e62b2e1..f9c8ee6b845 100644
+index 5cc3ed4d43e..f9c8ee6b845 100644
 --- a/include/violite.h
 +++ b/include/violite.h
-@@ -147,7 +147,8 @@ int vio_getnameinfo(const struct sockaddr *sa,
+@@ -149,7 +149,8 @@ int vio_getnameinfo(const struct sockaddr *sa,
  /* Set yaSSL to use same type as MySQL do for socket handles */
  typedef my_socket YASSL_SOCKET_T;
  #define YASSL_SOCKET_T_DEFINED
@@ -38,19 +38,18 @@ index b823e62b2e1..f9c8ee6b845 100644
  #undef template
  #include <openssl/err.h>
 diff --git a/mysys_ssl/my_crypt.cc b/mysys_ssl/my_crypt.cc
-index 4d7ebc7bd27..6fabb42f0cb 100644
+index a70ce4efef6..6fabb42f0cb 100644
 --- a/mysys_ssl/my_crypt.cc
 +++ b/mysys_ssl/my_crypt.cc
 @@ -18,7 +18,8 @@
  #include <my_global.h>
  #include <string.h>
- 
+
 -#define template _template /* bug in WolfSSL 4.4.0, see also violite.h */
 +// This causes template parse errors in the c++ stdlib.
 +// #define template _template /* bug in WolfSSL 4.4.0, see also violite.h */
  #include <openssl/evp.h>
  #undef template
  #include <openssl/aes.h>
--- 
+--
 2.39.2
-

@@ -13,17 +13,16 @@ diff --git a/mysql-test/main/ssl_cipher.test b/mysql-test/main/ssl_cipher.test
 index 4671b085ce7..0f926bf3e64 100644
 --- a/mysql-test/main/ssl_cipher.test
 +++ b/mysql-test/main/ssl_cipher.test
-@@ -4,8 +4,8 @@
- #
+@@ -10,8 +10,8 @@
  --source include/have_ssl_communication.inc
- 
+ --source include/count_sessions.inc
+
 -if (`select @@version_ssl_library like 'OpenSSL 1.1.1%'`) {
 -  skip OpenSSL 1.1.1;
 +if (`select @@version_ssl_library like 'OpenSSL 1.1.1%' OR @@version_ssl_library like 'AWS-LC%'`) {
 +  skip OpenSSL 1.1.1 and AWS-LC use different cipher names so we cannot reuse old tests with hardcoded cipher requirements;
  }
- 
- create user ssl_user1@localhost require SSL;
--- 
-2.39.2
 
+ create user ssl_user1@localhost require SSL;
+--
+2.39.2

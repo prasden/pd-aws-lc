@@ -43,7 +43,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eo pipefail
-          chmod +x "$AUTOFIX_SCRIPT"
           targets=$("$AUTOFIX_SCRIPT" recognize "$TARGET_RUN_ID")
           echo "Targets: $targets"
           echo "targets=$targets" >> "$GITHUB_OUTPUT"
@@ -85,16 +84,14 @@ jobs:
       - name: Fetch failed-job logs
         run: |
           set -exo pipefail
-          chmod +x "$AUTOFIX_SCRIPT"
           IFS='|' read -r integration version <<< "$TARGET"
           "$AUTOFIX_SCRIPT" fetch-logs "$integration" "$version" "$TARGET_RUN_ID"
         env:
           TARGET: ${{ matrix.target }}
           GH_TOKEN: ${{ github.token }}
-      # matrix.target is "<integration>|<version>" but auto_fix.sh writes its
-      # work dir as "<integration>[-<version>]". Convert | and / to - so the
-      # artifact paths below match the dir the script creates (e.g.
-      # "openvpn|release/2.6" -> "openvpn-release-2.6").
+      # Turn the target (e.g. "openvpn|release/2.6") into a plain name with no
+      # | or / (e.g. "openvpn-release-2.6") so it's safe to use in the artifact
+      # name and folder path below. This matches the folder auto_fix.sh writes to.
       - name: Derive target slug
         id: target
         run: |
@@ -110,7 +107,7 @@ jobs:
           "$AUTOFIX_SCRIPT" reason "$integration" "$version" "$TARGET_RUN_ID"
         env:
           TARGET: ${{ matrix.target }}
-          GIT_ALLOW_PROTOCOL: file:git:http:https:ssh
+          GIT_ALLOW_PROTOCOL: file:git:http:https
       - uses: actions/upload-artifact@v4
         with:
           name: resolve-patch-${{ steps.target.outputs.dir }}
@@ -163,7 +160,6 @@ jobs:
       - name: Apply patch and open draft PR
         run: |
           set -exo pipefail
-          chmod +x "$AUTOFIX_SCRIPT"
           IFS='|' read -r integration version <<< "$TARGET"
           "$AUTOFIX_SCRIPT" resolve "$integration" "$version" "$TARGET_RUN_ID"
         env:

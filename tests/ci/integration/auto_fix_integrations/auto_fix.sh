@@ -99,7 +99,6 @@ run_claude() {
 
 scan_secrets() {
   local patterns='(AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[A-Z0-9]{16}|aws_secret_access_key|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN[A-Z ]*PRIVATE KEY-----|[Bb]earer[[:space:]]+[A-Za-z0-9._-]{16,}'
-
   if LC_ALL=C grep -E -i -q "${patterns}" "$@"; then
     echo "::error::Potential secret detected in patch; refusing to open PR."
     exit 1
@@ -109,15 +108,17 @@ scan_secrets() {
 open_pr() {
   local target="$1"
   local branch_name="$2"
-  local push_url="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+  local repo_url="https://github.com/${REPO}.git"
+
+  gh auth setup-git
 
   # Skip if the branch already exists, triggered by a previous nighly run.
-  if git -C "${SRC_ROOT}" ls-remote --exit-code "${push_url}" "refs/heads/${branch_name}" >/dev/null 2>&1; then
+  if git -C "${SRC_ROOT}" ls-remote --exit-code "${repo_url}" "refs/heads/${branch_name}" >/dev/null 2>&1; then
     echo "Branch ${branch_name} already exists on ${REPO}; skipping push (existing PR is still open)."
     return
   fi
 
-  git -C "${SRC_ROOT}" push "${push_url}" "${branch_name}"
+  git -C "${SRC_ROOT}" push "${repo_url}" "${branch_name}"
 
   local pr_body
   pr_body="$(git -C "${SRC_ROOT}" log -1 --format=%b)
@@ -144,10 +145,12 @@ recognize_targets() {
   rm -rf "${targets_dir}"
   mkdir -p "${targets_dir}"
 
-  # A run with no failures emits no autofix-target artifacts.
+  # A failed run might not have any autofix-target artifacts (e.g. an infra failure),
+  # so return if there are none as otherwise the gh run download below would error.
   local count
-  count=$(gh api "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
-    --jq '[.artifacts[] | select(.name | startswith("autofix-target-"))] | length')
+  count=$(gh api --paginate "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
+    --jq '.artifacts[].name' \
+    | wc -l)
   if [[ "${count}" -eq 0 ]]; then
     echo "No autofix-target artifacts in run ${RUN_ID} (run had no failures)." >&2
     echo '[]'
@@ -157,16 +160,16 @@ recognize_targets() {
   gh run download "${RUN_ID}" --repo "${REPO}" \
     --pattern 'autofix-target-*' --dir "${targets_dir}"
 
-  # Each failed job emitted one "<integration>\t<version>" line (emit-autofix-target);
-  # read them all, keep only the targets we can actually fix, and emit as JSON.
+  # Each failed job emitted one "<integration>\t<version>" line. Read them all,
+  # apply the two skip rules below, and emit what's left as JSON.
   local integration version patch_dir
   while IFS=$'\t' read -r integration version _; do
+
     # Skip blank lines (a target file can end with a trailing newline).
     [[ -z "${integration}" ]] && continue
 
-    # emit-autofix-target fires on ANY integration-job failure, but some
-    # integrations build the downstream project unmodified and so have no
-    # *_patch dir. There is no patch for Claude to repair, so skip them.
+    # Skip integrations that have no patch dir (e.g. openssh): they test AWS-LC
+    # as a drop-in with no patches, so there's nothing for Claude to repair.
     patch_dir="${INTEGRATION_DIR}/${integration}_patch"
     [[ -d "${patch_dir}" ]] || continue
 
@@ -178,8 +181,9 @@ recognize_targets() {
       continue
     fi
     echo "${integration}|${version}"
+ 
   # The same integration+version can fail in more than one job (e.g. different
-  #  build flags), emitting the same line each time. sort -u drops the
+  # build flags), emitting the same line each time. sort -u drops the
   # duplicates, then jq turns the lines into a JSON list.
   done < <(find "${targets_dir}" -type f -name autofix-target.txt -exec cat {} +) \
     | sort -u \
@@ -187,28 +191,25 @@ recognize_targets() {
 }
 
 
-# Clone the downstream repos the runner script uses into <dest>/<n>, so Claude
-# can read the source and dry-run patches without needing clone or network access.
 clone_downstream_repos() {
   local runner_script="$1" dest="$2"
   mkdir -p "${dest}"
 
-  # Grab the URL from each `git clone` line. Skip ones that are a shell variable
-  # so we don't try to clone an unexpanded "${VAR}".
+  # Clone each repo the runner `git clone`s. We grep the URLs out of the script
+  # statically, so a URL built from a shell variable (e.g. `git clone "${REPO}"`)
+  # comes through with a literal "$" — skip those since we can't resolve them here.
   local url name
   while read -r url; do
     [[ -z "${url}" || "${url}" == *'$'* ]] && continue
     name="$(basename "${url}" .git)"
-    if ! git clone "${url}" "${dest}/${name}" >&2; then
-      echo "::warning::Failed to clone ${url}; Claude will work without it." >&2
-    fi
+    git clone "${url}" "${dest}/${name}" >&2 || echo "::warning::Failed to clone ${url}." >&2
   done < <(grep -hoE 'git clone[^|;&]*(https?|git)://[^[:space:]]+' "${runner_script}" \
              | grep -oE '(https?|git)://[^[:space:]]+')
 }
 
 # Run Claude on one failed target to repair its patch. We pre-clone the
-# downstream repos and pre-fetch the logs first, so Claude works without clone or
-# network access: it reads the runner script, checks out the right ref in the
+# downstream repos and pre-fetch the logs first,
+# then reads the runner script, checks out the right ref in the
 # existing clone, and commits a fix on a resolve/<target> branch. If it commits,
 # we export that commit as a patch for the resolve step.
 reason_integration_failure() {

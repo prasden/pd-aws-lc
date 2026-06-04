@@ -50,6 +50,25 @@ jobs:
             run: |
               python3 -m pip install --upgrade meson
               ./tests/ci/integration/run_bind9_integration.sh
+          - name: openldap-v2.5
+            arch: x86_64
+            size: medium
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_openldap_integration.sh OPENLDAP_REL_ENG_2_5
+          - name: ntp
+            arch: x86_64
+            size: small
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_ntp_integration.sh
+          - name: openvpn-v2.6
+            arch: x86_64
+            size: medium
+            image: ubuntu:22.04
+            compiler: gcc-12
+            ipv6: true
+            run: ./tests/ci/integration/run_openvpn_integration.sh release/2.6
     env:
       OPENSSH_BRANCH: ${{ matrix.openssh_branch || '' }}
       ACCP_FIPS: ${{ matrix.accp_fips || '' }}

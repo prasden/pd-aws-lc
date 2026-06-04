@@ -30,14 +30,6 @@ jobs:
           # TEST-ONLY slim matrix: a few patch-based targets whose patches we
           # intentionally break so the runner fails at patch-apply (a real
           # "downstream drifted" failure) and the autofix flow has work to do.
-          # OpenLDAP Integration Tests
-          - name: openldap-v2.5
-            arch: x86_64
-            size: medium
-            image: ubuntu:22.04
-            compiler: gcc-12
-            run: ./tests/ci/integration/run_openldap_integration.sh OPENLDAP_REL_ENG_2_5
-
           # NTP Integration Tests
           - name: ntp
             arch: x86_64

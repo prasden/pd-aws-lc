@@ -53,19 +53,19 @@ index 1be2ea3..ea3f7e0 100644
 -				macname);
 -			len = 0;
 -		}
-+    if (EVP_MD_flags(ctx->digest) & EVP_MD_FLAG_XOF) {
-+    	// The callers expect the hash to always contain 16 bytes
-+      len = MD5_DIGEST_LENGTH;
-+      if (!EVP_DigestFinalXOF(ctx, digest, len)) {
-+        msyslog(LOG_ERR, "make_mac: MAC %s Digest Final failed.", macname);
-+        len = 0;
-+      }
-+    } else {
-+      if (!EVP_DigestFinal(ctx, digest, &len)) {
-+        msyslog(LOG_ERR, "make_mac: MAC %s Digest Final failed.", macname);
-+        len = 0;
-+      }
-+    }
++		if (EVP_MD_flags(EVP_MD_CTX_md(ctx)) & EVP_MD_FLAG_XOF) {
++			/* XOF digests (e.g. SHAKE128): callers expect exactly 16 bytes */
++			len = MD5_DIGEST_LENGTH;
++			if (!EVP_DigestFinalXOF(ctx, digest, len)) {
++				msyslog(LOG_ERR, "make_mac: MAC %s Digest Final failed.", macname);
++				len = 0;
++			}
++		} else {
++			if (!EVP_DigestFinal(ctx, digest, &len)) {
++				msyslog(LOG_ERR, "make_mac: MAC %s Digest Final failed.", macname);
++				len = 0;
++			}
++		}
  #else /* !OPENSSL */
  		(void)key_type; /* unused, so try to prevent compiler from croaks */
  		if (!EVP_DigestInit(ctx, EVP_get_digestbynid(key_type))) {

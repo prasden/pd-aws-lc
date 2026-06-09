@@ -27,25 +27,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # TEST-ONLY slim matrix: a few patch-based targets whose patches we
-          # intentionally break so the runner fails at patch-apply (a real
-          # "downstream drifted" failure) and the autofix flow has work to do.
-          # NTP Integration Tests
-          - name: ntp
+          # TEST-ONLY: openssh has no patch dir, so recognize should filter it out.
+          - name: openssh-master
             arch: x86_64
             size: small
-            image: ubuntu:22.04
-            compiler: gcc-12
-            run: ./tests/ci/integration/run_ntp_integration.sh
-
-          # OpenVPN Integration Tests
-          - name: openvpn-v2.6
-            arch: x86_64
-            size: medium
-            image: ubuntu:22.04
-            compiler: gcc-12
-            ipv6: true
-            run: ./tests/ci/integration/run_openvpn_integration.sh release/2.6
+            image: amazonlinux:2023
+            compiler: clang-15
+            openssh_branch: master
+            run: ./tests/ci/integration/run_openssh_integration.sh
     env:
       OPENSSH_BRANCH: ${{ matrix.openssh_branch || '' }}
       ACCP_FIPS: ${{ matrix.accp_fips || '' }}
@@ -76,9 +65,6 @@ jobs:
           integration=${integration%_integration} # Drop the _integration suffix to leave the bare integration name.
           version=${version//[\'\"]/} # Strip surrounding quotes (some matrix entries quote the version arg).
 
-          # openssh doesn't pass its branch on the command line as it reads it
-          # from the $OPENSSH_BRANCH env var, so grab the version from there.
-          [[ -z "$version" && "$integration" == "openssh" ]] && version="$OPENSSH_BRANCH"
           echo "integration=$integration" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
         env:

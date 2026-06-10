@@ -27,14 +27,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # TEST-ONLY: openssh has no patch dir, so recognize should filter it out.
-          - name: openssh-master
+          # TEST-ONLY: ntp has a patch dir, so it reaches Claude in the reason job.
+          # We intentionally break its patch so Claude has real repair work, which
+          # verifies the denyRead/sandbox restrictions still let Claude do its job.
+          - name: ntp
             arch: x86_64
             size: small
-            image: amazonlinux:2023
-            compiler: clang-15
-            openssh_branch: master
-            run: ./tests/ci/integration/run_openssh_integration.sh
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_ntp_integration.sh
     env:
       OPENSSH_BRANCH: ${{ matrix.openssh_branch || '' }}
       ACCP_FIPS: ${{ matrix.accp_fips || '' }}

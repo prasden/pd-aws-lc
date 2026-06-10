@@ -39,9 +39,9 @@ index 1be2ea3..ea3f7e0 100644
 @@ -10,6 +10,7 @@
  #include "crypto.h"
  #include <ctype.h>
- #include "isc/string.h"
+ #include "isc/string_THIS_CONTEXT_NO_LONGER_MATCHES.h"
 +#include "openssl/md5.h"
- 
+
  struct key *key_ptr;
  size_t key_cnt = 0;
 @@ -101,11 +102,19 @@ compute_mac(

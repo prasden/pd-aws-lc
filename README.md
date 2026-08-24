@@ -215,3 +215,4 @@ If you package or distribute AWS-LC, or use AWS-LC as part of a large multi-user
 <!-- ci-demo: before fix, expect deployment rockets -->
 <!-- after-fix trigger: expect ZERO rockets -->
 <!-- third trigger: fix definitely live -->
+<!-- fourth trigger: fix on BOTH default and head -->

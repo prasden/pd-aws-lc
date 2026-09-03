@@ -432,9 +432,11 @@ OPENSSL_EXPORT int SSL_get_error(const SSL *ssl, int ret_code);
 
 // SSL_ERROR_SYSCALL indicates the operation failed externally to the library.
 // The caller should consult the system-specific error mechanism. This is
-// typically |errno| but may be something custom if using a custom |BIO|. It
-// may also be signaled if the transport returned EOF, in which case the
-// operation's return value will be zero.
+// typically |errno| but may be something custom if using a custom |BIO|.
+//
+// A read that hits a transport EOF before the peer's close_notify is instead
+// reported as |SSL_ERROR_SSL| with |SSL_R_UNEXPECTED_EOF_WHILE_READING|, unless
+// |SSL_OP_IGNORE_UNEXPECTED_EOF| is set.
 #define SSL_ERROR_SYSCALL 5
 
 // SSL_ERROR_ZERO_RETURN indicates the operation failed because the connection
@@ -639,7 +641,8 @@ OPENSSL_EXPORT int SSL_version(const SSL *ssl);
 // SSL_OP_IGNORE_UNEXPECTED_EOF configures a connection to treat an unexpected
 // transport EOF (the peer closing the connection without sending a
 // close_notify alert) as a clean shutdown. When set, |SSL_read| reports
-// |SSL_ERROR_ZERO_RETURN| instead of |SSL_ERROR_SYSCALL|. 
+// |SSL_ERROR_ZERO_RETURN|. When unset, |SSL_read| reports |SSL_ERROR_SSL| with
+// |SSL_R_UNEXPECTED_EOF_WHILE_READING| on the error queue.
 #define SSL_OP_IGNORE_UNEXPECTED_EOF 0x00000080L
 
 // SSL_OP_CIPHER_SERVER_PREFERENCE configures servers to select ciphers and
@@ -6681,6 +6684,7 @@ BSSL_NAMESPACE_END
 #define SSL_R_SERIALIZATION_INVALID_SSL_AEAD_CONTEXT 506
 #define SSL_R_BAD_HYBRID_KEYSHARE 507
 #define SSL_R_BAD_KEM_CIPHERTEXT 508
+#define SSL_R_UNEXPECTED_EOF_WHILE_READING 509
 #define SSL_R_SSLV3_ALERT_CLOSE_NOTIFY 1000
 #define SSL_R_SSLV3_ALERT_UNEXPECTED_MESSAGE 1010
 #define SSL_R_SSLV3_ALERT_BAD_RECORD_MAC 1020

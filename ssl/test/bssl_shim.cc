@@ -1256,6 +1256,16 @@ static bool DoExchange(bssl::UniquePtr<SSL_SESSION> *out_session,
         int n = DoRead(ssl_uniqueptr, buf.get(), read_size);
         ssl = ssl_uniqueptr->get();
         int err = SSL_get_error(ssl, n);
+        bool unexpected_eof =
+            err == SSL_ERROR_SSL &&
+            ERR_GET_LIB(ERR_peek_error()) == ERR_LIB_SSL &&
+            ERR_GET_REASON(ERR_peek_error()) ==
+                SSL_R_UNEXPECTED_EOF_WHILE_READING;
+        if (unexpected_eof) {
+          ERR_clear_error();
+          // Stop on unclean shutdown.
+          break;
+        }
         if (err == SSL_ERROR_ZERO_RETURN ||
             (n == 0 && err == SSL_ERROR_SYSCALL)) {
           if (n != 0) {

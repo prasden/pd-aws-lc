@@ -31,6 +31,7 @@ TIMEOUT = int(os.environ.get("AUTOFIX_TIMEOUT", 900))
 FOCUS = os.environ.get("AUTOFIX_FOCUS", "1") == "1"
 
 _PATCH_TOKEN = re.compile(r"[a-z0-9_]+_patch")
+_COMPILER_SETUP = re.compile(r"setup-(\S+)\.sh")
 
 
 def sh(*args: str | Path, check: bool = True) -> str:
@@ -48,6 +49,13 @@ def omnibus() -> dict:
 
 def matrix() -> list[dict]:
     return omnibus()["jobs"]["integrations"]["strategy"]["matrix"]["include"]
+
+
+def _has_image(image: str) -> bool:
+    try:
+        return subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0
+    except FileNotFoundError:
+        return False
 
 
 @dataclass
@@ -113,27 +121,31 @@ class Target:
         return path
 
     @cached_property
-    def matrix_entry(self) -> dict:
+    def ci_job(self) -> dict:
         for entry in matrix():
             other = Target.from_run(entry["run"])
             if other.integration == self.integration and self.version in ("", other.version):
                 return entry
-        return {}
+        steps = omnibus()["jobs"].get(self.integration, {}).get("steps", [])
+        docker = next((s["with"] for s in steps if self.runner.name in s.get("with", {}).get("run", "")), {})
+        compiler = _COMPILER_SETUP.search(docker.get("run", ""))
+        return {"image": docker.get("image", "").rpartition("aws-lc/")[2], "compiler": compiler and compiler[1]}
 
-    @property
+    @cached_property
     def image(self) -> str:
         if override := os.environ.get("AUTOFIX_VERIFY_IMAGE"):
             return override
-        image = self.matrix_entry.get("image", "")
+        image = self.ci_job.get("image", "")
         if not image or "{{" in image:
             image = "ubuntu:22.04"
-        registry = os.environ.get("AUTOFIX_ECR_REGISTRY")
-        return f"{registry}/aws-lc/{image}" if registry else image
+        if registry := os.environ.get("AUTOFIX_ECR_REGISTRY"):
+            return f"{registry}/aws-lc/{image}"
+        return f"aws-lc/{image}" if _has_image(f"aws-lc/{image}") else image
 
     @property
     def command(self) -> str:
         command = f"bash {self.runner.relative_to(ROOT).as_posix()} {self.version}".rstrip()
-        if compiler := self.matrix_entry.get("compiler"):
+        if compiler := self.ci_job.get("compiler"):
             setup = f"/opt/compiler-env/setup-{compiler}.sh"
             command = f"if [ -f {setup} ]; then source {setup}; fi; {command}"
         return command

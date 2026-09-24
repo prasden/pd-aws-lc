@@ -23,6 +23,7 @@ GRPC_REF="${1:-v1.72.2}"
 #    - GRPC_BUILD_FOLDER
 
 # Assumes script is executed from the root of aws-lc directory
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 SCRATCH_FOLDER="${SYS_ROOT}/GRPC_BUILD_ROOT"
 GRPC_SRC_FOLDER="${SCRATCH_FOLDER}/grpc"
 GRPC_BUILD_FOLDER="${SCRATCH_FOLDER}/grpc/cmake/build"
@@ -38,6 +39,15 @@ git clone --depth 1 --branch "${GRPC_REF}" https://github.com/grpc/grpc.git ${GR
 record_repo_commit "${GRPC_SRC_FOLDER}"
 cd ${GRPC_SRC_FOLDER}
 git submodule update --recursive --init
+
+# Upstream gRPC's new MLKEM1024 tests (added on master) hard-code the group
+# name that real OpenSSL >= 3.5 reports for the negotiated key exchange group
+# ("id-alg-ml-kem-1024"). AWS-LC (like BoringSSL) reports "MLKEM1024" instead,
+# matching the naming already used for the pre-existing X25519MLKEM768 tests.
+# Only master tracks that recently-added test; pinned release tags predate it.
+if [ "${GRPC_REF}" == "master" ]; then
+  patch -p1 --quiet -i "${SCRIPT_DIR}/grpc_patch/mlkem1024-negotiated-group-name.patch"
+fi
 
 aws_lc_build "$SRC_ROOT" "$AWS_LC_BUILD_FOLDER" "$AWS_LC_INSTALL_FOLDER" -DBUILD_TESTING=OFF -DBUILD_TOOL=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_SHARED_LIBS=1
 

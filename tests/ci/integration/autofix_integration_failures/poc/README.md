@@ -67,7 +67,7 @@ python -m autofix_poc open-pr --yes       # push + open the draft PR on your for
 | `AUTOFIX_VERIFY` | unset | `1` = run the real runner in Docker each attempt |
 | `AUTOFIX_VERIFY_IMAGE` | auto | override the image; default comes from the omnibus job (e.g. openssh → `amazonlinux:2023`, ruby → `ubuntu:24.04`), preferring a local `aws-lc/<image>` |
 | `AUTOFIX_ECR_REGISTRY` | unset | use prebuilt `<registry>/aws-lc/<image>` (with build deps) instead of the bare base image |
-| `AUTOFIX_FOCUS` | `1` | on each try, run only the tests that failed in CI (openssh). Set `0` for the full runner |
+| `AUTOFIX_FOCUS` | `1` | on each try, run only the tests that failed in CI (openssh, ruby). Set `0` for the full runner |
 | `AUTOFIX_MAX_TURNS` / `AUTOFIX_MAX_TOKENS` / `AUTOFIX_TIMEOUT` / `AUTOFIX_MAX_TRIES` | 40 / 400000 / 900 / 2(5) | agent caps |
 
 ## Artifacts (`autofix-poc-work/<name>/out/`)

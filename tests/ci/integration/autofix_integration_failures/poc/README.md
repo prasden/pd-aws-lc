@@ -32,7 +32,7 @@ export AUTOFIX_MODEL=us.anthropic.claude-sonnet-5   # default; 1M context on (AU
 ```
 
 Needs: Bedrock access to `AUTOFIX_MODEL`, `gh` (authed), `git`/`patch`; Docker + an image
-with build deps for `verify`/`run` (point `AUTOFIX_VERIFY_IMAGE` at a prebuilt `aws-lc/<image>`;
+with build deps for `verify`/`run` (a local `aws-lc/<image>` build is picked up automatically;
 a plain `ubuntu:22.04` lacks cmake/gcc/autotools).
 
 ## Run (real failure → PR on your fork)
@@ -65,7 +65,7 @@ python -m autofix_poc open-pr --yes       # push + open the draft PR on your for
 | `AUTOFIX_FORK` | `prasden/pd-aws-lc` | PR target repo (your fork) |
 | `AUTOFIX_BASE` | `main` | PR base branch |
 | `AUTOFIX_VERIFY` | unset | `1` = run the real runner in Docker each attempt |
-| `AUTOFIX_VERIFY_IMAGE` | auto | override the image; default is auto-detected from the omnibus matrix (e.g. openssh → `amazonlinux:2023`) |
+| `AUTOFIX_VERIFY_IMAGE` | auto | override the image; default comes from the omnibus job (e.g. openssh → `amazonlinux:2023`, ruby → `ubuntu:24.04`), preferring a local `aws-lc/<image>` |
 | `AUTOFIX_ECR_REGISTRY` | unset | use prebuilt `<registry>/aws-lc/<image>` (with build deps) instead of the bare base image |
 | `AUTOFIX_FOCUS` | `1` | on each try, run only the tests that failed in CI (openssh). Set `0` for the full runner |
 | `AUTOFIX_MAX_TURNS` / `AUTOFIX_MAX_TOKENS` / `AUTOFIX_TIMEOUT` / `AUTOFIX_MAX_TRIES` | 40 / 400000 / 900 / 2(5) | agent caps |

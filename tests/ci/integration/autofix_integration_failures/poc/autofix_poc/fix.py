@@ -29,6 +29,7 @@ _RAN_TEST = re.compile(r"^(?:\S+ )?run test (\S+)\.sh \.\.\.$", re.M)
 _TESTS_STARTED = re.compile(r"^(?:\S+ )?\+ make tests$", re.M)
 _T_EXEC_PASSED = re.compile(r"^(?:\S+ )?all t-exec passed$", re.M)
 _CI_ERROR = re.compile(r"^.*##\[error\].*$", re.M)
+_RUBY_FAILURE = re.compile(r"^(?:\S+ )?\s*\d+\) (?:Failure|Error):\n(?:\S+ )?([A-Z][\w:]*#\w+[?!]?)", re.M)
 _LICENSE = ("By submitting this pull request, I confirm that my contribution is made under "
             "the terms of the Apache 2.0 license and the ISC license.")
 
@@ -54,11 +55,19 @@ def _openssh_focus(logs: list[str]) -> dict[str, str]:
         if _T_EXEC_PASSED.search(log) or not (ran := _RAN_TEST.findall(log)):
             return {}
         failed.add(ran[-1])
-    flags = ["LTESTS=" + "\\ ".join(sorted(failed)), "REGRESS_TARGETS=", "INTEROP_TESTS=", "EXTRA_TESTS=", "SKIP_UNIT=1"]
-    return {"MAKEFLAGS": " ".join(flags)}
+    return _makeflags(LTESTS=sorted(failed), REGRESS_TARGETS=[], INTEROP_TESTS=[], EXTRA_TESTS=[], SKIP_UNIT=["1"])
 
 
-_FOCUS = {"openssh": _openssh_focus}
+def _ruby_focus(logs: list[str]) -> dict[str, str]:
+    failed = sorted({test for log in logs for test in _RUBY_FAILURE.findall(log)})
+    return _makeflags(TESTOPTS=[f"--name={test}" for test in failed]) if failed else {}
+
+
+def _makeflags(**variables: list[str]) -> dict[str, str]:
+    return {"MAKEFLAGS": " ".join(f"{name}=" + "\\ ".join(values) for name, values in variables.items())}
+
+
+_FOCUS = {"openssh": _openssh_focus, "ruby": _ruby_focus}
 
 
 def focus(target: Target) -> dict[str, str]:

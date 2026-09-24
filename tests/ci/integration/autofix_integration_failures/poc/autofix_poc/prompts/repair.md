@@ -31,6 +31,8 @@ Steps:
      previously applied) patch detected` for every hunk), `delete_file` it and remove
      the runner step that applies it. Never write an empty patch.
    - If the fix belongs in the runner (e.g. a build flag or ref), `write_file` the runner.
+   - If a new upstream test fails and no patch covers it, pick the smaller fix: a new patch
+     in the patch directory (plus the runner step that applies it) or a runner change.
 6. Validate: re-`patch_dry_run` against a clean checkout (re-`run_git checkout` the ref).
    Every patch must apply with no rejects.
 7. Write the PR description to `{description_path}` by filling in the repository's PR

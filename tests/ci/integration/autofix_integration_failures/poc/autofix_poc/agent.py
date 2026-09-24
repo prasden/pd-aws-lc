@@ -93,12 +93,13 @@ class Toolbox:
 
     @tool
     def write_file(self, path: str, content: str) -> str:
-        """Overwrite a file. Allowed only for the patch files and the runner
-        script — the editable surface. Use this to replace broken hunks or to
-        adjust the runner (build flags, refs, test invocation)."""
+        """Create or overwrite a file. Allowed only for the patch files and the
+        runner script — the editable surface. Use this to replace broken hunks,
+        add a new patch, or adjust the runner (build flags, refs, test invocation)."""
         target = self._guard(path, self.writable)
         if not content.strip():
             raise ValueError("empty content: use delete_file for a patch that is no longer needed")
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
         return f"wrote {len(content)} bytes to {target}"
 

@@ -1,162 +1,169 @@
 name: autofix
 
 on:
-  workflow_run:
-    workflows: ["integration-omnibus"]
-    types: [completed]
+  workflow_call:
 
 permissions:
   contents: read
-  actions: read
 
 env:
-  TARGET_RUN_ID: ${{ github.event.workflow_run.id }}
-  AUTOFIX_SCRIPT: ./tests/ci/integration/autofix_integration_failures/autofix.sh
+  WORK_DIR: ${{ github.workspace }}/autofix-work
 
 jobs:
-  get-failing-integrations:
-    name: get-failing-integrations
-    if: >-
-      github.event.workflow_run.event == 'schedule' &&
-      github.event.workflow_run.conclusion == 'failure'
+  recognize:
+    name: recognize
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
         image:linux-5.0
         instance-size:small
+    permissions:
+      contents: read
+      actions: read
     outputs:
-      targets: ${{ steps.targets.outputs.targets }}
+      targets: ${{ steps.recognize.outputs.targets }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Collect failing targets
-        id: targets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          targets=$("$AUTOFIX_SCRIPT" get-failing-targets "$TARGET_RUN_ID")
-          echo "Targets: $targets"
-          echo "targets=$targets" >> "$GITHUB_OUTPUT"
-      - name: Download each failing integration's logs
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TARGETS: ${{ steps.targets.outputs.targets }}
-        run: |
-          echo "$TARGETS" | jq -r '.[] | "\(.integration)\t\(.version)"' \
-            | while IFS=$'\t' read -r integration version; do
-            "$AUTOFIX_SCRIPT" fetch-logs "$TARGET_RUN_ID" "$integration" "$version"
-          done
-      - uses: actions/upload-artifact@v7
-        if: always()
+      - uses: actions/setup-python@v7
         with:
-          name: autofix-logs
-          # Save the logs folder so the `reason` job find the logs.
-          path: autofix/
-          if-no-files-found: ignore
+          python-version: "3.13"
+      - name: Collect failing targets, logs, and repos
+        id: recognize
+        working-directory: tests/ci/integration
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -m autofix recognize --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --work-dir "$WORK_DIR"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: autofix-workspaces
+          path: autofix-work/
+          include-hidden-files: true
 
   reason:
-    name: reason (${{ matrix.target.dir }})
-    needs: get-failing-integrations
-    if: needs.get-failing-integrations.outputs.targets != '[]' && needs.get-failing-integrations.outputs.targets != ''
-    permissions:
-      id-token: write
-      contents: read
-      actions: read
+    name: reason (${{ matrix.target }})
+    needs: recognize
+    if: needs.recognize.outputs.targets != '[]'
     strategy:
       fail-fast: false
       max-parallel: 5
       matrix:
-        target: ${{ fromJSON(needs.get-failing-integrations.outputs.targets) }}
+        target: ${{ fromJSON(needs.recognize.outputs.targets) }}
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
         image:linux-5.0
         instance-size:small
-    env:
-      CLAUDE_CODE_USE_BEDROCK: "1"
-      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1" # Strip Anthropic creds from all subprocesses
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: autofix-workspaces
+          path: autofix-work/
+      # Log in with the runner's own role before assuming the Bedrock role, which cannot pull images.
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
       - name: Load shared Bedrock settings
-        # .github/workflows/ai-config.json is where configurations for both autofix and backport are located
-        # needs to run before configure-aws-credentials
-        run: |
-          jq -r '"AWS_REGION=\(.aws_region)",
-                 "ANTHROPIC_DEFAULT_OPUS_MODEL=\(.opus)",
-                 "ANTHROPIC_DEFAULT_SONNET_MODEL=\(.sonnet)",
-                 "ANTHROPIC_DEFAULT_HAIKU_MODEL=\(.haiku)"' \
-            .github/workflows/ai-config.json >> "$GITHUB_ENV"
+        run: jq -r '"AWS_REGION=\(.aws_region)"' .github/workflows/ai-config.json >> "$GITHUB_ENV"
       - uses: ./.github/actions/configure-aws-credentials
         with:
           oidcRole: AwsLcGitHubActionsAutofixOidcRole
           roleName: AwsLcGitHubActionsBedrockRole
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code@2
-      - name: Install Bash sandbox deps
-        # Claude Code's sandbox needs bubblewrap (filesystem/process isolation)
-        # and socat (relays Bash traffic through the domain-allowlist proxy).
-        run: sudo dnf install -y bubblewrap socat
-      - name: Verify the sandbox hides credentials and blocks non-allowlisted hosts
-        run: |
-          "$AUTOFIX_SCRIPT" verify-settings
-      - name: Download pre-fetched logs
-        uses: actions/download-artifact@v8
+      - uses: actions/setup-python@v7
         with:
-          name: autofix-logs
-          path: autofix/
-        continue-on-error: true
-      - name: Autofix the patch
+          python-version: "3.13"
+      - name: Fix the integration with the agent
+        working-directory: tests/ci/integration
         env:
-          INTEGRATION: ${{ matrix.target.integration }}
-          VERSION: ${{ matrix.target.version }}
-        run: |
-          set -x
-          "$AUTOFIX_SCRIPT" reason "$TARGET_RUN_ID" "$INTEGRATION" "$VERSION"
+          TARGET: ${{ matrix.target }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: python -m autofix reason --work-dir "$WORK_DIR" --target "$TARGET" --registry "$ECR_REGISTRY"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: autofix-${{ matrix.target.dir }}
-          path: autofix/${{ matrix.target.dir }}/
+          name: autofix-reason-${{ matrix.target }}
+          path: autofix-work/${{ matrix.target }}/out/
           if-no-files-found: ignore
 
-  upload:
-    name: upload (${{ matrix.target.dir }})
-    needs: [get-failing-integrations, reason]
-    if: ${{ always() && needs.get-failing-integrations.outputs.targets != '[]' && needs.get-failing-integrations.outputs.targets != '' }}
-    permissions:
-      id-token: write
-      contents: read
-      actions: read
+  verify:
+    name: verify (${{ matrix.target }})
+    needs: [recognize, reason]
+    if: always() && needs.recognize.outputs.targets != '[]'
     strategy:
       fail-fast: false
       max-parallel: 5
       matrix:
-        target: ${{ fromJSON(needs.get-failing-integrations.outputs.targets) }}
+        target: ${{ fromJSON(needs.recognize.outputs.targets) }}
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
         image:linux-5.0
         instance-size:small
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/configure-aws-credentials
+      - uses: actions/download-artifact@v8
         with:
-          oidcRole: AwsLcGitHubActionsAutofixOidcRole
-          roleName: AwsLcGitHubActionAutofixUploadRole
-      - name: Download results from reason job
-        uses: actions/download-artifact@v8
+          name: autofix-workspaces
+          path: autofix-work/
+      - uses: actions/download-artifact@v8
         with:
-          name: autofix-${{ matrix.target.dir }}
-          path: autofix/${{ matrix.target.dir }}/
-        continue-on-error: true
-      - name: Upload results to S3
+          name: autofix-reason-${{ matrix.target }}
+          path: autofix-work/${{ matrix.target }}/out/
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Run the integration exactly like CI with the fix applied
+        working-directory: tests/ci/integration
         env:
-          INTEGRATION: ${{ matrix.target.integration }}
-          VERSION: ${{ matrix.target.version }}
-        run: |
-          set -x
-          # Suffix must match S3_FOR_AUTOFIX_INTEGRATION_FAILURES in tests/ci/cdk/util/metadata.py
-          export AUTOFIX_BUCKET="${AWS_ACCOUNT_ID}-aws-lc-autofix-integration-failures"
-          "$AUTOFIX_SCRIPT" upload "$TARGET_RUN_ID" "$INTEGRATION" "$VERSION"
+          TARGET: ${{ matrix.target }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: python -m autofix verify --work-dir "$WORK_DIR" --target "$TARGET" --registry "$ECR_REGISTRY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: autofix-verify-${{ matrix.target }}
+          path: autofix-work/${{ matrix.target }}/verify/
+          if-no-files-found: ignore
+
+  resolve:
+    name: resolve (${{ matrix.target }})
+    needs: [recognize, verify]
+    if: always() && needs.recognize.outputs.targets != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.recognize.outputs.targets) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: autofix-reason-${{ matrix.target }}
+          path: autofix-work/${{ matrix.target }}/out/
+      - uses: actions/download-artifact@v8
+        with:
+          name: autofix-verify-${{ matrix.target }}
+          path: autofix-work/${{ matrix.target }}/verify/
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Open a PR if verify passed
+        working-directory: tests/ci/integration
+        env:
+          TARGET: ${{ matrix.target }}
+          GH_TOKEN: ${{ github.token }}
+        run: python -m autofix resolve --work-dir "$WORK_DIR" --target "$TARGET" --repo "$GITHUB_REPOSITORY"

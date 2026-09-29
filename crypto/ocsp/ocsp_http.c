@@ -38,6 +38,10 @@
 // Headers set, no final \r\n included
 #define OHS_HTTP_HEADER (9 | OHS_NOREAD)
 
+static int has_crlf(const char *s) {
+  return s != NULL && strpbrk(s, "\r\n") != NULL;
+}
+
 static int check_protocol(char *line) {
   if (strlen(line) >= 4 && strncmp(line, "HTTP", 4) == 0) {
     return 1;
@@ -458,10 +462,6 @@ err:
   return NULL;
 }
 
-static int has_crlf(const char *s) {
-  return s != NULL && strpbrk(s, "\r\n") != NULL;
-}
-
 int OCSP_REQ_CTX_http(OCSP_REQ_CTX *rctx, const char *op, const char *path) {
   static const char http_hdr[] = "%s %s HTTP/1.0\r\n";
 
@@ -469,8 +469,12 @@ int OCSP_REQ_CTX_http(OCSP_REQ_CTX *rctx, const char *op, const char *path) {
   if (path == NULL) {
     path = "/";
   }
+  if (op == NULL) {
+    OPENSSL_PUT_ERROR(OCSP, ERR_R_PASSED_NULL_PARAMETER);
+    return 0;
+  }
   if (has_crlf(op) || has_crlf(path)) {
-    OPENSSL_PUT_ERROR(OCSP, OCSP_R_ERROR_PARSING_URL);
+    OPENSSL_PUT_ERROR(OCSP, OCSP_R_INVALID_HTTP_HEADER);
     return 0;
   }
 
@@ -492,6 +496,7 @@ int OCSP_REQ_CTX_add1_header(OCSP_REQ_CTX *rctx, const char *name,
     return 0;
   }
   if (has_crlf(name) || has_crlf(value)) {
+    OPENSSL_PUT_ERROR(OCSP, OCSP_R_INVALID_HTTP_HEADER);
     return 0;
   }
   // The following being written conforms to the message-header field

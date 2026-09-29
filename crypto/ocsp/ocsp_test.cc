@@ -1365,6 +1365,33 @@ TEST(OCSPRequestTest, AddHeader) {
                       std::to_string(ocsp_request_data.size()).size() + 1));
 }
 
+TEST(OCSPRequestTest, RejectCRLF) {
+  bssl::UniquePtr<BIO> bio(BIO_new(BIO_s_mem()));
+  bssl::UniquePtr<OCSP_REQ_CTX> ocspReqCtx(OCSP_REQ_CTX_new(bio.get(), 0));
+  ASSERT_TRUE(ocspReqCtx);
+  BIO *mem = OCSP_REQ_CTX_get0_mem_bio(ocspReqCtx.get());
+
+  const char *bad[] = {"a\r\nX-Evil: 1", "a\rb", "a\nb"};
+  for (const char *s : bad) {
+    SCOPED_TRACE(s);
+    ERR_clear_error();
+    EXPECT_FALSE(OCSP_REQ_CTX_http(ocspReqCtx.get(), "POST", s));
+    EXPECT_EQ(OCSP_R_INVALID_HTTP_HEADER, ERR_GET_REASON(ERR_get_error()));
+    EXPECT_FALSE(OCSP_REQ_CTX_http(ocspReqCtx.get(), s, "/"));
+    EXPECT_EQ(OCSP_R_INVALID_HTTP_HEADER, ERR_GET_REASON(ERR_get_error()));
+    EXPECT_FALSE(OCSP_REQ_CTX_add1_header(ocspReqCtx.get(), s, "v"));
+    EXPECT_EQ(OCSP_R_INVALID_HTTP_HEADER, ERR_GET_REASON(ERR_get_error()));
+    EXPECT_FALSE(OCSP_REQ_CTX_add1_header(ocspReqCtx.get(), "Host", s));
+    EXPECT_EQ(OCSP_R_INVALID_HTTP_HEADER, ERR_GET_REASON(ERR_get_error()));
+  }
+
+  ERR_clear_error();
+  EXPECT_FALSE(OCSP_REQ_CTX_http(ocspReqCtx.get(), nullptr, "/"));
+  EXPECT_EQ(ERR_R_PASSED_NULL_PARAMETER, ERR_GET_REASON(ERR_get_error()));
+
+  EXPECT_EQ(0u, BIO_pending(mem));
+}
+
 // Check a |OCSP_CERTID| can be added to an |OCSP_REQUEST| with
 // OCSP_request_add0_id().
 TEST(OCSPRequestTest, AddCert) {

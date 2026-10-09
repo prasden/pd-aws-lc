@@ -53,7 +53,6 @@ class GitClient:
         self.git("-C", checkout, "checkout", "-q", "FETCH_HEAD")
 
     # Diff the paths, including files the agent created, which git diff skips while they are untracked.
-    # Example: a new ruby_patch/master/b.patch shows up as added lines, and "--name-only" lists it by path.
     def diff(self, checkout: Path, paths: list[Path], *options: str) -> str:
         pathspec = [str(path) for path in paths]
         self.git("-C", str(checkout), "add", "--intent-to-add", "--", *pathspec)

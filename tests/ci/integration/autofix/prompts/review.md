@@ -45,6 +45,4 @@ explain it or when it hides a failure.
 
 # Verdict
 
-- You MUST set `safe` to true only when every condition above holds. When in doubt, you MUST set `safe` to false.
-- You MUST list every suspicious item in `findings`, quoting the exact diff line or description text.
-- You MUST give a one-sentence `rationale`.
+You MUST set `safe` to true only when every condition above holds. When in doubt, you MUST set `safe` to false.

@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import subprocess
@@ -6,14 +7,15 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from pydantic import BaseModel
+from strands import tool
 from strands.sandbox.docker import DockerSandbox
 from strands_harness import create_harness
 
-from .agent import (MODEL, RETRY_PROMPT, REVIEW_PROMPT, REVIEW_TASK_PROMPT, SYSTEM_PROMPT, TASK_PROMPT,
-                    ReviewVerdict, describe_results, run_environments, run_integration)
 from .git import GitClient, GitHubClient
 from .integration import IntegrationTarget
 
+_MODEL = f"bedrock/{json.loads((Path(__file__).parents[4] / '.github/workflows/ai-config.json').read_text())['opus']}"
 _MAX_TRIES = 3
 _AGENT_TIMEOUT = 15 * 60
 _LOG_TAIL = 3000
@@ -31,6 +33,14 @@ _INVISIBLE_RANGES = [(0x00, 0x08), (0x0B, 0x0C), (0x0E, 0x1F), (0x7F, 0x9F), (0x
                      (0x2028, 0x202E), (0x2060, 0x2064), (0x2066, 0x2069), (0xFEFF, 0xFEFF), (0xE0000, 0xE007F)]
 _INVISIBLE_CHARACTERS = re.compile(
     "[" + "".join(f"{re.escape(chr(low))}-{re.escape(chr(high))}" for low, high in _INVISIBLE_RANGES) + "]")
+
+
+def _prompt(name: str) -> str:
+    return (Path(__file__).parent / "prompts" / f"{name}.md").read_text()
+
+
+class ReviewVerdict(BaseModel):
+    safe: bool
 
 
 class Harness:
@@ -68,17 +78,22 @@ class Harness:
         patch_dirs = target.patch_dirs(awslc)
         writable = [*patch_dirs, runner]
 
+        @tool
+        def run_integration() -> str:
+            """Run every failed CI environment with the current patches and return each result and log tail."""
+            return target.run(awslc, registry)[1]
+
         with self.agent_sandbox(image, sandbox_dir, writable) as sandbox:
             agent = create_harness(
-                model=MODEL,
-                instructions=SYSTEM_PROMPT,
+                model=_MODEL,
+                instructions=_prompt("system"),
                 sandbox=sandbox,
-                tools=[run_integration(target, awslc, registry)],
+                tools=[run_integration],
                 builtin_tools=["shell", "read", "write", "edit"],
                 builtin_plugins=[], session=False, memory=False, skills=False,
             )
 
-            prompt = TASK_PROMPT.format(
+            prompt = _prompt("task").format(
                 name=target.name,
                 version=target.version or "(none)",
                 sandbox_dir=sandbox_dir,
@@ -95,10 +110,10 @@ class Harness:
                 finally:
                     timer.cancel()
 
-                results = run_environments(target, awslc, registry)
-                if all(result.passed for result in results):
+                passed, report = target.run(awslc, registry)
+                if passed:
                     break
-                prompt = RETRY_PROMPT.format(results=describe_results(results))
+                prompt = _prompt("retry").format(results=report)
 
         out_dir = sandbox_dir / "out"
         out_dir.mkdir(exist_ok=True)
@@ -121,29 +136,21 @@ class Harness:
         logs = "\n\n".join(log.read_text()[-_LOG_TAIL:] for log in sorted((sandbox_dir / "logs").glob("*.log")))
 
         reviewer = create_harness(
-            model=MODEL,
-            system_prompt=REVIEW_PROMPT,
+            model=_MODEL,
+            system_prompt=_prompt("review"),
             builtin_tools=[], builtin_plugins=[], session=False, memory=False, skills=False,
             callback_handler=None,
         )
         verdict = reviewer(
-            REVIEW_TASK_PROMPT.format(logs=logs, diff=diff),
+            _prompt("review_task").format(logs=logs, diff=diff),
             structured_output_model=ReviewVerdict,
         ).structured_output
 
-        checks = [
-            *(f"{kind} found" for kind, pattern in _SECRET_PATTERNS.items() if pattern.search(diff + description)),
-            *(f"invisible or control character in the {name}"
-              for name, text in (("diff", diff), ("description", description)) if _INVISIBLE_CHARACTERS.search(text)),
-            *(f"not a patch file or the runner: {path.relative_to(awslc)}"
-              for path in changed_files if path != runner and path.suffix != ".patch"),
-            *([] if diff else ["the diff is empty"]),
-        ]
-        final = ReviewVerdict(
-            safe=verdict.safe and not checks,
-            findings=[*verdict.findings, *checks],
-            rationale=verdict.rationale,
-        )
+        text = diff + description
+        final = ReviewVerdict(safe=verdict.safe and bool(diff)
+                              and not any(pattern.search(text) for pattern in _SECRET_PATTERNS.values())
+                              and not _INVISIBLE_CHARACTERS.search(text)
+                              and all(path == runner or path.suffix == ".patch" for path in changed_files))
 
         (out_dir / "changes.diff").write_text(diff)
         (out_dir / "review.json").write_text(final.model_dump_json(indent=2))

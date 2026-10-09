@@ -1,5 +1,7 @@
 import json
 import re
+import shlex
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Self
@@ -10,6 +12,10 @@ _COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 _REPO_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 _INTEGRATION_NAME = re.compile(r"[a-z0-9_]+")
 _VERSION = re.compile(r"[A-Za-z0-9._/-]*")
+
+_RUNNER_TIMEOUT = 3600
+_LOG_TAIL = 8000
+_CONTAINER_AWSLC = Path("/aws-lc")
 
 
 @dataclass(frozen=True)
@@ -85,35 +91,45 @@ class IntegrationTarget:
         existing = [integration_dir / name for name in names if (integration_dir / name).is_dir()]
         return existing or [integration_dir / f"{self.name}_patch"]
 
-    @classmethod
-    def parse(cls, integration_failure_txt: str, awslc_url: str) -> Self:
+    def run(self, awslc: Path, registry: str) -> tuple[bool, str]:
+        passed, report = True, []
+        for env in self.environments:
+            command = (f"source /opt/compiler-env/setup-{env.compiler}.sh && "
+                       f"{self.runner(_CONTAINER_AWSLC)} {shlex.quote(self.version)}")
+            if env.user:
+                command = (f"mkdir -p /home/{env.user} && chown -R {env.user} /home/{env.user} {_CONTAINER_AWSLC} && "
+                           f"su -p {env.user} -c {shlex.quote(command)}")
 
-        lines = integration_failure_txt.splitlines()
-        integration_name, integration_version = lines[0].split("\t")
-        commits = [line.removeprefix("commit=").split() for line in lines if line.startswith("commit=")]
+            result = subprocess.run([
+                "docker", "run", "--rm",
+                f"--volume={awslc}:{_CONTAINER_AWSLC}",
+                f"--workdir={_CONTAINER_AWSLC}",
+                *(f"--env={key}={value}" for key, value in env.env_vars.items()),
+                *(["--sysctl=net.ipv6.conf.all.disable_ipv6=0"] if env.ipv6 else []),
+                *(["--privileged"] if env.privileged else []),
+                env.image_ref(registry),
+                "bash", "-c", command,
+            ], capture_output=True, text=True, timeout=_RUNNER_TIMEOUT)
 
-        return cls(
-            name=integration_name,
-            version=integration_version,
-            awslc_repo=Repo(url=awslc_url, sha=lines[1].removeprefix("awslc_sha=")),
-            integration_repos=tuple(Repo(url=url, sha=sha) for url, sha in commits),
-            environments=(Environment.from_job(json.loads(lines[-1].removeprefix("job="))),),
-        )
+            passed &= result.returncode == 0
+            status = "PASSED" if result.returncode == 0 else f"FAILED (exit {result.returncode})"
+            report.append(f"{env.arch}/{env.image}: {status}\n{(result.stdout + result.stderr)[-_LOG_TAIL:]}")
+        return passed, "\n\n".join(report)
 
     @classmethod
     def from_artifacts(cls, artifacts: Path, repo: str) -> list[Self]:
-        awslc_url = f"https://github.com/{repo}.git"
-        # {(integration name, integration version): target}
         targets: dict[tuple[str, str], Self] = {}
-
         for path in sorted(artifacts.glob("*/integration-failure.txt")):
-            failure = cls.parse(path.read_text(), awslc_url)
-            key = (failure.name, failure.version)
-
-            existing = targets.get(key)
-            if existing is not None:
-                existing.environments += failure.environments
-            else:
-                targets[key] = failure
-
-        return [targets[key] for key in sorted(targets)]
+            lines = path.read_text().splitlines()
+            name, version = lines[0].split("\t")
+            if (name, version) not in targets:
+                targets[name, version] = cls(
+                    name=name,
+                    version=version,
+                    awslc_repo=Repo(f"https://github.com/{repo}.git", lines[1].removeprefix("awslc_sha=")),
+                    integration_repos=tuple(Repo(*line.removeprefix("commit=").split())
+                                            for line in lines if line.startswith("commit=")),
+                    environments=(),
+                )
+            targets[name, version].environments += (Environment.from_job(json.loads(lines[-1].removeprefix("job="))),)
+        return list(targets.values())

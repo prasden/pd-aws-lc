@@ -1,0 +1,5 @@
+pydantic==2.14.0
+PyGithub==2.10.0
+requests==2.34.2
+strands-agents==1.59.0
+strands-harness==0.2.0

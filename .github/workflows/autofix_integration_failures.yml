@@ -2,17 +2,28 @@ name: autofix
 
 on:
   workflow_call:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: ID of a failed integration-omnibus run to repair
+        required: true
+      source_repo:
+        description: Repository that ran the omnibus, e.g. aws/aws-lc
+        required: true
+        default: aws/aws-lc
 
 permissions:
   contents: read
 
 env:
   WORK_DIR: ${{ github.workspace }}/autofix-work
+  RUN_ID: ${{ inputs.run_id || github.run_id }}
+  SOURCE_REPO: ${{ inputs.source_repo || github.repository }}
 
 jobs:
   recognize:
     name: recognize
-    runs-on:
+    runs-on: &codebuild
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
         image:linux-5.0
         instance-size:small
@@ -22,50 +33,57 @@ jobs:
     outputs:
       targets: ${{ steps.recognize.outputs.targets }}
     steps:
-      - uses: actions/checkout@v7
+      - &checkout
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v7
+      - &setup-python
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
+      - &install
+        run: pip install -r tests/ci/integration/autofix/requirements.txt
       - name: Collect failing targets, logs, and repos
         id: recognize
         working-directory: tests/ci/integration
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python -m autofix recognize --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --work-dir "$WORK_DIR"
+        run: |
+          targets=$(python -m autofix --work-dir "$WORK_DIR" recognize --repo "$SOURCE_REPO" --run-id "$RUN_ID")
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+      # Tar the workspaces so exec bits, git index stat data, and symlinks survive the artifact zip.
+      - run: tar -cf autofix-work.tar autofix-work
       - uses: actions/upload-artifact@v7
         with:
           name: autofix-workspaces
-          path: autofix-work/
-          include-hidden-files: true
+          path: autofix-work.tar
 
   reason:
     name: reason (${{ matrix.target }})
     needs: recognize
     if: needs.recognize.outputs.targets != '[]'
-    strategy:
+    strategy: &per-target
       fail-fast: false
       max-parallel: 5
       matrix:
         target: ${{ fromJSON(needs.recognize.outputs.targets) }}
-    runs-on:
-      - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
-        image:linux-5.0
-        instance-size:small
+    runs-on: *codebuild
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v8
+      - *checkout
+      - *setup-python
+      - *install
+      - &workspaces
+        uses: actions/download-artifact@v8
         with:
           name: autofix-workspaces
-          path: autofix-work/
+      - &untar
+        run: tar -xf autofix-work.tar
       # Log in with the runner's own role before assuming the Bedrock role, which cannot pull images.
-      - name: Login to Amazon ECR
+      - &ecr
+        name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
       - name: Load shared Bedrock settings
@@ -74,15 +92,17 @@ jobs:
         with:
           oidcRole: AwsLcGitHubActionsAutofixOidcRole
           roleName: AwsLcGitHubActionsBedrockRole
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
+      - &block-metadata
+        name: Block containers from the instance and CodeBuild credential endpoints
+        run: |
+          sudo iptables -I DOCKER-USER -d 169.254.169.254 -j DROP
+          sudo iptables -I DOCKER-USER -d 169.254.170.2 -j DROP
       - name: Fix the integration with the agent
         working-directory: tests/ci/integration
         env:
           TARGET: ${{ matrix.target }}
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: python -m autofix reason --work-dir "$WORK_DIR" --target "$TARGET" --registry "$ECR_REGISTRY"
+        run: python -m autofix --work-dir "$WORK_DIR" reason --target "$TARGET" --registry "$ECR_REGISTRY"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -93,42 +113,30 @@ jobs:
   verify:
     name: verify (${{ matrix.target }})
     needs: [recognize, reason]
-    if: always() && needs.recognize.outputs.targets != '[]'
-    strategy:
-      fail-fast: false
-      max-parallel: 5
-      matrix:
-        target: ${{ fromJSON(needs.recognize.outputs.targets) }}
-    runs-on:
-      - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
-        image:linux-5.0
-        instance-size:small
+    if: ${{ !cancelled() && needs.recognize.result == 'success' && needs.recognize.outputs.targets != '[]' }}
+    strategy: *per-target
+    runs-on: *codebuild
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v8
-        with:
-          name: autofix-workspaces
-          path: autofix-work/
-      - uses: actions/download-artifact@v8
+      - *checkout
+      - *setup-python
+      - *install
+      - *workspaces
+      - *untar
+      - &reason-out
+        uses: actions/download-artifact@v8
         with:
           name: autofix-reason-${{ matrix.target }}
           path: autofix-work/${{ matrix.target }}/out/
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
+      - *ecr
+      - *block-metadata
       - name: Run the integration exactly like CI with the fix applied
         working-directory: tests/ci/integration
         env:
           TARGET: ${{ matrix.target }}
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: python -m autofix verify --work-dir "$WORK_DIR" --target "$TARGET" --registry "$ECR_REGISTRY"
+        run: python -m autofix --work-dir "$WORK_DIR" verify --target "$TARGET" --registry "$ECR_REGISTRY"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -139,31 +147,25 @@ jobs:
   resolve:
     name: resolve (${{ matrix.target }})
     needs: [recognize, verify]
-    if: always() && needs.recognize.outputs.targets != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        target: ${{ fromJSON(needs.recognize.outputs.targets) }}
+    if: ${{ !cancelled() && needs.recognize.result == 'success' && needs.recognize.outputs.targets != '[]' }}
+    strategy: *per-target
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
+    permissions: {}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: autofix-reason-${{ matrix.target }}
-          path: autofix-work/${{ matrix.target }}/out/
+      - *checkout
+      - *setup-python
+      - *install
+      - *workspaces
+      - *untar
+      - *reason-out
       - uses: actions/download-artifact@v8
         with:
           name: autofix-verify-${{ matrix.target }}
           path: autofix-work/${{ matrix.target }}/verify/
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
-      - name: Open a PR if verify passed
+      - name: Push the fix to the fork and open a draft PR
         working-directory: tests/ci/integration
         env:
           TARGET: ${{ matrix.target }}
-          GH_TOKEN: ${{ github.token }}
-        run: python -m autofix resolve --work-dir "$WORK_DIR" --target "$TARGET" --repo "$GITHUB_REPOSITORY"
+          FORK: ${{ vars.AUTOFIX_FORK }}
+          GH_TOKEN: ${{ secrets.AUTOFIX_FORK_TOKEN }}
+        run: python -m autofix --work-dir "$WORK_DIR" resolve --target "$TARGET" --repo "$GITHUB_REPOSITORY" --fork "$FORK"

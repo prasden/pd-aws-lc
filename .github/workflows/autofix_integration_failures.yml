@@ -22,7 +22,6 @@ env:
 
 jobs:
   recognize:
-    name: recognize
     runs-on: &codebuild
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
         image:linux-5.0
@@ -59,7 +58,6 @@ jobs:
           path: autofix-work.tar
 
   reason:
-    name: reason (${{ matrix.target }})
     needs: recognize
     if: needs.recognize.outputs.targets != '[]'
     strategy: &per-target
@@ -99,7 +97,7 @@ jobs:
           sudo iptables -I DOCKER-USER -d 169.254.170.2 -j DROP
       - name: Fix the integration with the agent
         working-directory: tests/ci/integration
-        env:
+        env: &target-env
           TARGET: ${{ matrix.target }}
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: python -m autofix --work-dir "$WORK_DIR" reason --target "$TARGET" --registry "$ECR_REGISTRY"
@@ -111,9 +109,8 @@ jobs:
           if-no-files-found: ignore
 
   verify:
-    name: verify (${{ matrix.target }})
     needs: [recognize, reason]
-    if: ${{ !cancelled() && needs.recognize.result == 'success' && needs.recognize.outputs.targets != '[]' }}
+    if: &has-targets ${{ !cancelled() && needs.recognize.result == 'success' && needs.recognize.outputs.targets != '[]' }}
     strategy: *per-target
     runs-on: *codebuild
     permissions:
@@ -133,9 +130,7 @@ jobs:
       - *block-metadata
       - name: Run the integration exactly like CI with the fix applied
         working-directory: tests/ci/integration
-        env:
-          TARGET: ${{ matrix.target }}
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        env: *target-env
         run: python -m autofix --work-dir "$WORK_DIR" verify --target "$TARGET" --registry "$ECR_REGISTRY"
       - uses: actions/upload-artifact@v7
         if: always()
@@ -145,9 +140,8 @@ jobs:
           if-no-files-found: ignore
 
   resolve:
-    name: resolve (${{ matrix.target }})
     needs: [recognize, verify]
-    if: ${{ !cancelled() && needs.recognize.result == 'success' && needs.recognize.outputs.targets != '[]' }}
+    if: *has-targets
     strategy: *per-target
     runs-on: ubuntu-latest
     permissions: {}

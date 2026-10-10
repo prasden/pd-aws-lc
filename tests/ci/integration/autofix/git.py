@@ -1,18 +1,15 @@
 import base64
-import io
 import os
 import re
 import subprocess
-import zipfile
 from pathlib import Path
 
-import requests
-from github import Auth, Github
-from github.WorkflowJob import WorkflowJob
+from pydantic.dataclasses import dataclass
 
-from .integration import IntegrationTarget, Repo, git_config_env
-
-_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# Allow only full SHAs and plain folder names from integration-failure.txt, because downstream tests can rewrite it.
+# Example: a commit sha of "--upload-pack=cmd" would run cmd in git fetch, so anything but 40 hex chars is rejected.
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+_REPO_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 _HISTORY_DEPTH = "100"
 _LOCKED_DOWN_GIT = ("-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never",
                     "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "-c", "core.symlinks=false",
@@ -20,57 +17,29 @@ _LOCKED_DOWN_GIT = ("-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=n
 _BOT_IDENTITY = ("-c", "user.name=aws-lc-autofix", "-c", "user.email=aws-lc-autofix@users.noreply.github.com")
 
 
-def _clean_log(log: str) -> str:
-    return "".join(char for char in _ANSI_ESCAPE.sub("", log) if char.isprintable() or char in "\t\n")
+@dataclass(frozen=True)
+class Repo:
+    url: str
+    sha: str
+
+    # Reject a repo before git sees it unless it is an https URL at a full SHA with a safe folder name.
+    # Example: file:///etc, ext::sh -c ..., and https://github.com/x/.. all raise ValueError.
+    def __post_init__(self):
+        if not (self.url.startswith("https://") and _COMMIT_SHA.fullmatch(self.sha) and _REPO_NAME.fullmatch(self.name)):
+            raise ValueError(f"rejected repo from integration-failure.txt: {self.url} {self.sha}")
+
+    @property
+    def name(self) -> str:
+        return Path(self.url).name.removesuffix(".git")
 
 
-# Talk to GitHub with GH_TOKEN: read run artifacts and job logs, push the reviewed fix, and open its PR.
-# Example: GitHubClient("aws/aws-lc").failure_targets(37706164434) never touches a URL taken from an artifact.
-class GitHubClient:
-    def __init__(self, repo: str):
-        self.token = os.environ["GH_TOKEN"]
-        self.repo = Github(auth=Auth.Token(self.token)).get_repo(repo)
-
-    def _download(self, url: str) -> bytes:
-        response = requests.get(url, headers={"Authorization": f"Bearer {self.token}"}, timeout=120)
-        response.raise_for_status()
-        return response.content
-
-    # Read the run's failure reports, taking the aws-lc commit from the run itself because the reports are untrusted.
-    # Example: a report that names an attacker's aws-lc fork commit still repairs the commit the nightly tested.
-    def failure_targets(self, run_id: int) -> list[IntegrationTarget]:
-        run = self.repo.get_workflow_run(run_id)
-        reports = []
-        for artifact in run.get_artifacts():
-            if artifact.name.startswith("integration-failure-"):
-                with zipfile.ZipFile(io.BytesIO(self._download(artifact.archive_download_url))) as archive:
-                    reports.append(archive.read("integration-failure.txt").decode())
-        return IntegrationTarget.from_reports(reports, Repo(self.repo.clone_url, run.head_sha))
-
-    def job_logs(self, run_id: int, target: IntegrationTarget) -> dict[int, str]:
-        return {job.id: _clean_log(self._download(f"{job.url}/logs").decode(errors="replace"))
-                for job in self._failed_jobs(run_id, target)}
-
-    # Pick the target's failed jobs by the ids in its reports, or by job name when the reports predate job ids.
-    # Example: ruby master matches ruby-master-x86_64 and ruby-master-fips-x86_64 but not ruby-3.4-x86_64.
-    def _failed_jobs(self, run_id: int, target: IntegrationTarget) -> list[WorkflowJob]:
-        failed = [job for job in self.repo.get_workflow_run(run_id).jobs() if job.conclusion == "failure"]
-        if job_ids := {env.job_id for env in target.environments if env.job_id}:
-            return [job for job in failed if job.id in job_ids]
-        prefix = target.name.replace("_", "-")
-        return ([job for job in failed if job.name.startswith(f"{prefix}-{target.version}")]
-                or [job for job in failed if job.name.startswith(prefix)])
-
-    # Push the committed fix to a branch on the fork, passing the token in a header so it never appears in argv.
-    # Example: ruby master pushes autofix/2026-10-09-ruby-master to prasden/pd-aws-lc.
-    def push(self, checkout: Path, fork: str, branch: str) -> None:
-        basic = base64.b64encode(f"x-access-token:{self.token}".encode()).decode()
-        auth = git_config_env({"http.https://github.com/.extraheader": f"AUTHORIZATION: basic {basic}"})
-        _git("-C", str(checkout), "push", "-q", f"https://github.com/{fork}.git", f"HEAD:refs/heads/{branch}", **auth)
-
-    def open_draft_pr(self, fork: str, branch: str, title: str, body: str) -> str:
-        head = f"{fork.partition('/')[0]}:{branch}"
-        return self.repo.create_pull(base=self.repo.default_branch, head=head, title=title, body=body, draft=True).html_url
+# Pass git config as environment variables, which reach every git call in the container, including under su -p.
+# Example: {"safe.directory": "*"} gives GIT_CONFIG_COUNT=1, GIT_CONFIG_KEY_0=safe.directory, GIT_CONFIG_VALUE_0=*.
+def git_config_env(config: dict[str, str]) -> dict[str, str]:
+    variables = {"GIT_CONFIG_COUNT": str(len(config))}
+    for index, (key, value) in enumerate(config.items()):
+        variables |= {f"GIT_CONFIG_KEY_{index}": key, f"GIT_CONFIG_VALUE_{index}": value}
+    return variables
 
 
 # Run git with no credentials, config files, hooks, prompts, symlinks, or ext/fd protocols, for untrusted URLs and SHAs.
@@ -117,3 +86,11 @@ def commit(checkout: Path, branch: str, message: str) -> None:
 # Fetch the full history so a push works even when the fork lacks the commits below the shallow clone.
 def unshallow(checkout: Path, repo: Repo) -> None:
     _git("-C", str(checkout), "fetch", "-q", "--unshallow", "--no-tags", repo.url, repo.sha)
+
+
+# Push HEAD to a branch, passing the token in a header so it never appears in argv.
+# Example: push(checkout, "https://github.com/crypto-alg/aws-lc.git", "autofix/2026-10-09-ruby-master", token).
+def push(checkout: Path, url: str, branch: str, token: str) -> None:
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    auth = git_config_env({"http.https://github.com/.extraheader": f"AUTHORIZATION: basic {basic}"})
+    _git("-C", str(checkout), "push", "-q", url, f"HEAD:refs/heads/{branch}", **auth)

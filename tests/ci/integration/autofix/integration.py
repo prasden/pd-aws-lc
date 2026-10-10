@@ -10,12 +10,11 @@ from pydantic.dataclasses import dataclass
 from strands.sandbox.errors import SandboxTimeoutError
 from strands.sandbox.types import ExecutionResult
 
-from .container import Access, Container, Mount, Network, Variables
+from .container import Container, Mount
+from .git import Repo, git_config_env
 
-# Allow only plain names, versions, and SHAs from integration-failure.txt, because downstream tests can rewrite it.
-# Example: a commit sha of "--upload-pack=cmd" would run cmd in git fetch, so anything but 40 hex chars is rejected.
-_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
-_REPO_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
+# Allow only plain names, versions, and tokens from integration-failure.txt, because downstream tests can rewrite it.
+# Example: an image of "ubuntu:24.04" passes, and an image or compiler that holds a space or "$" is rejected.
 _INTEGRATION_NAME = re.compile(r"[a-z0-9_]+")
 _VERSION = re.compile(r"[A-Za-z0-9._/-]*")
 type Token = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9._:-]*$")]
@@ -30,38 +29,14 @@ _NEEDS_NETWORK = {"accp", "bind9", "crt", "grpc", "httpd", "librdkafka", "nmap",
                   "rust_openssl", "xtrabackup"}
 
 
-# Pass git config as environment variables, which reach every git call in the container, including under su -p.
-# Example: {"safe.directory": "*"} gives GIT_CONFIG_COUNT=1, GIT_CONFIG_KEY_0=safe.directory, GIT_CONFIG_VALUE_0=*.
-def git_config_env(config: Variables) -> Variables:
-    variables = {"GIT_CONFIG_COUNT": str(len(config))}
-    for index, (key, value) in enumerate(config.items()):
-        variables |= {f"GIT_CONFIG_KEY_{index}": key, f"GIT_CONFIG_VALUE_{index}": value}
-    return variables
-
-
-@dataclass(frozen=True)
 class Sandbox:
-    root: Path
-
-    @property
-    def awslc(self) -> Path:
-        return self.root / "aws-lc"
-
-    @property
-    def src(self) -> Path:
-        return self.root / "src"
-
-    @property
-    def logs(self) -> Path:
-        return self.root / "logs"
-
-    @property
-    def out(self) -> Path:
-        return self.root / "out"
-
-    @property
-    def verify(self) -> Path:
-        return self.root / "verify"
+    def __init__(self, root: Path):
+        self.root = root
+        self.awslc = root / "aws-lc"
+        self.src = root / "src"
+        self.logs = root / "logs"
+        self.out = root / "out"
+        self.verify = root / "verify"
 
 
 @dataclass(frozen=True)
@@ -72,7 +47,7 @@ class Environment:
     job_id: int = 0
     user: Token = ""
     ipv6: bool = False
-    env_vars: Variables = field(default_factory=dict)
+    env_vars: dict[str, str] = field(default_factory=dict)
 
     def image_ref(self, registry: str) -> str:
         return f"{registry}/aws-lc/{self.image}"
@@ -94,22 +69,6 @@ class Environment:
                 f"su -p {self.user} -c {shlex.quote(command)}",
             ])
         return f"bash -c {shlex.quote(command)}"
-
-
-@dataclass(frozen=True)
-class Repo:
-    url: str
-    sha: str
-
-    # Reject a repo before git sees it unless it is an https URL at a full SHA with a safe folder name.
-    # Example: file:///etc, ext::sh -c ..., and https://github.com/x/.. all raise ValueError.
-    def __post_init__(self):
-        if not (self.url.startswith("https://") and _COMMIT_SHA.fullmatch(self.sha) and _REPO_NAME.fullmatch(self.name)):
-            raise ValueError(f"rejected repo from integration-failure.txt: {self.url} {self.sha}")
-
-    @property
-    def name(self) -> str:
-        return Path(self.url).name.removesuffix(".git")
 
 
 @dataclass
@@ -157,10 +116,10 @@ class IntegrationTarget:
     # List the patch dirs the runner names, or a new <name>_patch when none exist.
     # Example: tpm2_tss gives tpm2_tools_patch and tpm2_tss_patch, and an unpatched integration gets a new <name>_patch.
     def patch_dirs(self, awslc: Path) -> list[Path]:
-        integration_dir = awslc / "tests/ci/integration"
-        names = sorted(set(re.findall(r"[a-z0-9_]+_patch", self.runner(awslc).read_text())))
-        existing = [integration_dir / name for name in names if (integration_dir / name).is_dir()]
-        return existing or [integration_dir / f"{self.name}_patch"]
+        runner = self.runner(awslc)
+        names = sorted(set(re.findall(r"[a-z0-9_]+_patch", runner.read_text())))
+        existing = [runner.parent / name for name in names if (runner.parent / name).is_dir()]
+        return existing or [runner.parent / f"{self.name}_patch"]
 
     # List the paths the agent may change, refusing any that a CI run swapped for a symlink to elsewhere on the host.
     # Example: a kafka_patch -> /etc link planted by downstream test code raises instead of mounting /etc.
@@ -178,7 +137,7 @@ class IntegrationTarget:
             name=f"autofix-agent-{self.dir_name}",
             image=self.environments[0].image_ref(registry),
             workdir=sandbox.root,
-            mounts=[Mount(sandbox.root, sandbox.root, Access.READ_ONLY), *editable],
+            mounts=[Mount(sandbox.root, sandbox.root, read_only=True), *editable],
             user=f"{os.getuid()}:{os.getgid()}",
             locked_down=True,
         )
@@ -187,14 +146,14 @@ class IntegrationTarget:
     # Example: openssh's git clone https://github.com/openssh/openssh-portable.git copies /autofix-src/openssh-portable.
     def ci_container(self, env: Environment, sandbox: Sandbox, registry: str) -> Container:
         clones = {f"url.file://{_CONTAINER_SRC / repo.name}.insteadOf": repo.url for repo in self.integration_repos}
-        frozen = [Mount(path, _CONTAINER_AWSLC / path.relative_to(sandbox.awslc), Access.READ_ONLY)
+        frozen = [Mount(path, _CONTAINER_AWSLC / path.relative_to(sandbox.awslc), read_only=True)
                   for path in [sandbox.awslc / ".git", *self.writable(sandbox.awslc)]]
         return Container(
             name=f"autofix-ci-{self.dir_name}",
             image=env.image_ref(registry),
             workdir=_CONTAINER_AWSLC,
-            mounts=[Mount(sandbox.awslc, _CONTAINER_AWSLC), *frozen, Mount(sandbox.src, _CONTAINER_SRC, Access.READ_ONLY)],
-            network=Network.BRIDGE if self.name in _NEEDS_NETWORK else Network.NONE,
+            mounts=[Mount(sandbox.awslc, _CONTAINER_AWSLC), *frozen, Mount(sandbox.src, _CONTAINER_SRC, read_only=True)],
+            network=self.name in _NEEDS_NETWORK,
             env=env.env_vars | git_config_env({"safe.directory": "*"} | clones),
             sysctls={"net.ipv6.conf.all.disable_ipv6": "0"} if env.ipv6 else {},
         )
@@ -204,13 +163,15 @@ class IntegrationTarget:
     async def run(self, sandbox: Sandbox, registry: str) -> tuple[bool, str]:
         passed, report = True, []
         for env in self.environments:
+            command = env.command(self.runner(_CONTAINER_AWSLC), self.version)
             with self.ci_container(env, sandbox, registry).start() as container:
                 try:
-                    result = await container.execute(env.command(self.runner(_CONTAINER_AWSLC), self.version),
-                                                     timeout=_RUNNER_TIMEOUT)
+                    result = await container.execute(command, timeout=_RUNNER_TIMEOUT)
                 except SandboxTimeoutError as timeout:
                     result = ExecutionResult(exit_code=124, stdout=timeout.stdout, stderr=timeout.stderr)
-            passed &= result.exit_code == 0
-            status = "PASSED" if result.exit_code == 0 else f"FAILED (exit {result.exit_code})"
-            report.append(f"{env.arch}/{env.image}: {status}\n{(result.stdout + result.stderr)[-_RUNNER_LOG_TAIL:]}")
+            env_passed = result.exit_code == 0
+            passed &= env_passed
+            status = "PASSED" if env_passed else f"FAILED (exit {result.exit_code})"
+            log_tail = (result.stdout + result.stderr)[-_RUNNER_LOG_TAIL:]
+            report.append(f"{env.arch}/{env.image}: {status}\n{log_tail}")
         return passed, "\n\n".join(report)

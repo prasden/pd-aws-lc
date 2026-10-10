@@ -15,7 +15,7 @@ from strands.types.agent import Limits
 from strands_harness import create_harness
 
 from . import git
-from .git import GitHubClient
+from .github_client import GitHubClient
 from .integration import IntegrationTarget, Sandbox
 
 _AI_CONFIG = json.loads((Path(__file__).parents[4] / ".github/workflows/ai-config.json").read_text())
@@ -35,10 +35,8 @@ _SECRET_PATTERNS = (
 )
 # Match characters that hide text from people but not from models, except tab, newline, and carriage return.
 # Example: zero-width spaces, bidi overrides, and U+E0000 tag characters that spell out hidden instructions.
-_INVISIBLE_RANGES = [(0x00, 0x08), (0x0B, 0x0C), (0x0E, 0x1F), (0x7F, 0x9F), (0xAD, 0xAD), (0x200B, 0x200F),
-                     (0x2028, 0x202E), (0x2060, 0x2064), (0x2066, 0x2069), (0xFEFF, 0xFEFF), (0xE0000, 0xE007F)]
-_INVISIBLE_CHARACTERS = re.compile(
-    "[" + "".join(f"{re.escape(chr(low))}-{re.escape(chr(high))}" for low, high in _INVISIBLE_RANGES) + "]")
+_INVISIBLE_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\xad\U0000200b-\U0000200f\U00002028-\U0000202e"
+                                   r"\U00002060-\U00002064\U00002066-\U00002069\U0000feff\U000e0000-\U000e007f]")
 # Build a harness with no plugins, memory, sessions, skills, or background tasks, running one tool at a time.
 # Example: two run_integration calls in one turn run one after the other instead of racing for one CI container name.
 _bare_harness = partial(create_harness, model=f"bedrock/{_AI_CONFIG['opus']}", builtin_plugins=[], session=False,
@@ -97,12 +95,16 @@ class Harness:
 
     def reason(self, target: IntegrationTarget, registry: str) -> ReviewVerdict:
         sandbox = self.sandbox(target)
+        patch_dirs = target.patch_dirs(sandbox.awslc)
+        for patch_dir in patch_dirs:
+            patch_dir.mkdir(parents=True, exist_ok=True)
         tries = count(1)
 
         @tool
         async def run_integration() -> str:
             """Run every failed CI environment with the current patches and return each result and log tail."""
-            return (await target.run(sandbox, registry))[1]
+            _, report = await target.run(sandbox, registry)
+            return report
 
         # Run the integration after each finished agent pass and resume the agent with the failure, up to three passes.
         # Example: a fix that still fails on aarch64 resumes the agent with the aarch64 log tail.
@@ -112,8 +114,15 @@ class Harness:
                 if not passed:
                     event.resume = _prompt("retry").format(results=report)
 
-        for patch_dir in target.patch_dirs(sandbox.awslc):
-            patch_dir.mkdir(parents=True, exist_ok=True)
+        repos = [f"`{sandbox.src / repo.name}` ({repo.url} at {repo.sha})" for repo in target.integration_repos]
+        prompt = _prompt("task").format(
+            name=target.name,
+            version=target.version or "(none)",
+            sandbox_dir=sandbox.root,
+            repos=", ".join(repos) or "(none recorded)",
+            runner=target.runner(sandbox.awslc),
+            patch_dirs=", ".join(f"`{patch_dir}`" for patch_dir in patch_dirs),
+        )
         with target.agent_container(sandbox, registry).start() as container:
             agent = _bare_harness(
                 instructions=_prompt("system"),
@@ -121,15 +130,6 @@ class Harness:
                 tools=[run_integration],
                 hooks=[rerun_until_green],
                 builtin_tools=["shell", "read", "write", "edit"],
-            )
-            prompt = _prompt("task").format(
-                name=target.name,
-                version=target.version or "(none)",
-                sandbox_dir=sandbox.root,
-                repos=", ".join(f"`{sandbox.src / repo.name}` ({repo.url} at {repo.sha})"
-                                for repo in target.integration_repos) or "(none recorded)",
-                runner=target.runner(sandbox.awslc),
-                patch_dirs=", ".join(f"`{patch_dir}`" for patch_dir in target.patch_dirs(sandbox.awslc)),
             )
             deadline = threading.Event()
             timer = threading.Timer(_AGENT_TIMEOUT, deadline.set)
@@ -148,11 +148,11 @@ class Harness:
         allowed_paths = target.writable(sandbox.awslc)
         diff = git.diff(sandbox.awslc, allowed_paths)
         description = (sandbox.out / "description.md").read_text()
-        logs = "\n\n".join(log.read_text()[-_REVIEW_LOG_TAIL:] for log in sorted(sandbox.logs.glob("*.log")))
+        log_tails = [log.read_text()[-_REVIEW_LOG_TAIL:] for log in sorted(sandbox.logs.glob("*.log"))]
 
         reviewer = _bare_harness(system_prompt=_prompt("review"), builtin_tools=[], callback_handler=None)
         verdict = reviewer(
-            _prompt("review_task").format(logs=logs, diff=diff, description=description),
+            _prompt("review_task").format(logs="\n\n".join(log_tails), diff=diff, description=description),
             structured_output_model=ReviewVerdict,
         ).structured_output
 
@@ -185,7 +185,8 @@ class Harness:
         reviewed = ReviewVerdict.model_validate_json((sandbox.out / "review.json").read_text()).safe
         verified = VerifyResult.model_validate_json((sandbox.verify / "verify.json").read_text()).passed
         changed_files = git.changed_files(sandbox.awslc, [sandbox.awslc])
-        if not (reviewed and verified and _follows_rules(diff, description, changed_files, target.runner(sandbox.awslc))):
+        follows_rules = _follows_rules(diff, description, changed_files, target.runner(sandbox.awslc))
+        if not (reviewed and verified and follows_rules):
             raise PermissionError(f"{target.dir_name}: the fix was not reviewed safe and verified")
 
         branch = f"autofix/{date.today()}-{target.dir_name}"

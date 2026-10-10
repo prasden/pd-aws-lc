@@ -2,33 +2,20 @@ import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from enum import StrEnum
 from pathlib import Path
 
 from strands.sandbox.docker import DockerSandbox
-
-type Flags = list[str]
-type Variables = dict[str, str]
-
-
-class Access(StrEnum):
-    READ_ONLY = "ro"
-    READ_WRITE = "rw"
-
-
-class Network(StrEnum):
-    NONE = "none"
-    BRIDGE = "bridge"
 
 
 @dataclass(frozen=True)
 class Mount:
     host: Path
     container: Path
-    access: Access = Access.READ_WRITE
+    read_only: bool = False
 
     def flag(self) -> str:
-        return f"--volume={self.host}:{self.container}:{self.access}"
+        access = "ro" if self.read_only else "rw"
+        return f"--volume={self.host}:{self.container}:{access}"
 
 
 @dataclass(frozen=True)
@@ -37,17 +24,17 @@ class Container:
     image: str
     workdir: Path
     mounts: list[Mount]
-    network: Network = Network.NONE
-    env: Variables = field(default_factory=dict)
-    sysctls: Variables = field(default_factory=dict)
+    network: bool = False
+    env: dict[str, str] = field(default_factory=dict)
+    sysctls: dict[str, str] = field(default_factory=dict)
     user: str = ""
     locked_down: bool = False
 
-    def flags(self) -> Flags:
+    def flags(self) -> list[str]:
         flags = [
             f"--name={self.name}",
             f"--workdir={self.workdir}",
-            f"--network={self.network}",
+            f"--network={'bridge' if self.network else 'none'}",
             *(mount.flag() for mount in self.mounts),
             *(f"--env={key}={value}" for key, value in self.env.items()),
             *(f"--sysctl={key}={value}" for key, value in self.sysctls.items()),

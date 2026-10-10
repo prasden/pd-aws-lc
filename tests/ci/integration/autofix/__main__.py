@@ -2,7 +2,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .git import GitHubClient
+from .github_client import GitHubClient
 from .harness import Harness
 
 with_target = argparse.ArgumentParser(add_help=False)

@@ -50,7 +50,7 @@ function libwebsockets_build() {
 
 function libwebsockets_test() {
   pushd $SOCKET_BUILD_DIR
-  ctest -j --output-on-failure
+  ctest -j --output-on-failures
 }
 
 git clone https://github.com/warmcat/libwebsockets.git ${SOCKET_SRC_FOLDER}

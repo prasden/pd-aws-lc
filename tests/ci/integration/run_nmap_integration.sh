@@ -39,7 +39,7 @@ function nmap_build() {
   ./configure \
     --prefix="$NMAP_BUILD_PREFIX" \
     --exec-prefix="$NMAP_BUILD_EPREFIX" \
-    --with-openssl="$AWS_LC_INSTALL_FOLDER" \
+    --with-openssl="$AWS_LC_INSTALL_DIR" \
     --without-zenmap
 
   make -j install

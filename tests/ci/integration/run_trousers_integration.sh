@@ -35,7 +35,7 @@ pushd "${SCRATCH_FOLDER}"
 function trousers_build() {
   git apply "${SCRIPT_DIR}/trousers_patch/aws-lc-trousers.patch"
   sh ./bootstrap.sh
-  CFLAGS="-Werror=implicit-function-declaration -Wno-deprecated" ./configure --with-gui=none --prefix="${TROUSERS_INSTALL_FOLDER}" --with-openssl="${AWS_LC_INSTALL_FOLDER}"
+  CFLAGS="-Werror=implicit-function-declaration -Wno-deprecated" ./configure --with-gui=none --prefix="${TROUSERS_INSTALL_FOLDER}" --with-openssl="${AWS_LC_INSTALL_DIR}"
   make -j "$NUM_CPU_THREADS" install
   ${AWS_LC_BUILD_FOLDER}/check-linkage.sh "${TROUSERS_INSTALL_FOLDER}/sbin/tcsd" crypto || exit 1
 }

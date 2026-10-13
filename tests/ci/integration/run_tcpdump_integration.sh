@@ -36,7 +36,7 @@ function tcpdump_build() {
   # No patch currently needed.
   # git apply "${SCRIPT_DIR}/tcpdump_patch/aws-lc-tcpdump.patch"
   autoreconf -fi
-  ./configure --prefix="${TCPDUMP_INSTALL_FOLDER}" --with-crypto="${AWS_LC_INSTALL_FOLDER}"
+  ./configure --prefix="${TCPDUMP_INSTALL_FOLDER}" --with-crypto="${AWS_LC_INSTALL_DIR}"
   make -j "${NUM_CPU_THREADS}" install
   ${AWS_LC_BUILD_FOLDER}/check-linkage.sh "${TCPDUMP_INSTALL_FOLDER}/bin/tcpdump" crypto || exit 1
 }

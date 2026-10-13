@@ -39,7 +39,7 @@ function bind9_patch() {
 function bind9_build() {
   #dnsrps was removed since bind9 9.21.2
   meson setup "$BIND9_BUILD_FOLDER" \
-    --pkg-config-path="${AWS_LC_INSTALL_FOLDER}/lib/pkgconfig" \
+    --pkg-config-path="${AWS_LC_INSTALL_DIR}/lib/pkgconfig" \
     --libdir=lib \
     -Ddnstap=enabled \
     -Dcmocka=enabled \

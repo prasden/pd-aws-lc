@@ -48,7 +48,7 @@ cd "${GRPC_SRC_FOLDER}/cmake/build"
 # AWS-LC is a BoringSSL fork that supports these APIs but defines OPENSSL_IS_AWSLC
 # instead, so we set OPENSSL_IS_BORINGSSL explicitly to enable those code paths.
 time cmake -GNinja -DgRPC_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release  -DgRPC_SSL_PROVIDER=package\
-      -DBUILD_SHARED_LIBS=ON -DOPENSSL_ROOT_DIR="${AWS_LC_INSTALL_FOLDER}" \
+      -DBUILD_SHARED_LIBS=ON -DOPENSSL_ROOT_DIR="${AWS_LC_INSTALL_DIR}" \
       -DCMAKE_C_FLAGS="-DOPENSSL_IS_BORINGSSL=1" -DCMAKE_CXX_FLAGS="-DOPENSSL_IS_BORINGSSL=1" ../..
 grpc_tests=$(grep add_executable ../../CMakeLists.txt | grep _test | grep -E '(tls|ssl|cert)' | cut -d '(' -f2)
 # bad_ssl_*_test binaries spawn bad_ssl_*_server at runtime. This dependency is

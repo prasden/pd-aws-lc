@@ -28,7 +28,7 @@ rm -rf "${SCRATCH_FOLDER:?}"/*
 cd ${SCRATCH_FOLDER}
 
 function postgres_build() {
-  ./configure --with-openssl --enable-tap-tests --with-includes=${AWS_LC_INSTALL_FOLDER}/include --with-libraries=${AWS_LC_INSTALL_FOLDER}/lib --prefix=$(pwd)/build
+  ./configure --with-openssl --enable-tap-tests --with-includes=${AWS_LC_INSTALL_DIR}/include --with-libraries=${AWS_LC_INSTALL_FOLDER}/lib --prefix=$(pwd)/build
   make -j "$NUM_CPU_THREADS"
   # Build additional modules for postgres.
   make -j "$NUM_CPU_THREADS" -C contrib all

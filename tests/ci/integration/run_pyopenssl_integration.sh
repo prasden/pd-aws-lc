@@ -64,7 +64,9 @@ function pyopenssl_run_tests() {
     python -m pip install --no-binary cryptography cryptography
 
     # Install PyOpenSSL from the patched source along with test dependencies.
-    python -m pip install -e '.[test]'
+    # Keep --no-binary so a cryptography version pin in PyOpenSSL is also built
+    # from source against AWS-LC instead of pulling a wheel with bundled OpenSSL.
+    python -m pip install --no-binary cryptography -e '.[test]'
 
     # Verify that PyOpenSSL is linked against AWS-LC.
     python -c "

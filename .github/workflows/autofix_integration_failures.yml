@@ -113,7 +113,7 @@ jobs:
         uses: ./.github/actions/configure-aws-credentials
         with:
           oidcRole: AwsLcGitHubActionsAutofixOidcRole
-          roleName: AwsLcGitHubActionsBedrockRole
+          roleName: AwsLcGitHubActionAutofixReasoningRole
       - &block-metadata
         name: Block containers from the instance and CodeBuild credential endpoints
         run: |

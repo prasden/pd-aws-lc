@@ -5,13 +5,12 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from .agent import Agent, run_integration
+from .agent import Agent, read_ci_logs, run_integration
 from .git import Git, Repo
 from .sandbox import Sandbox, VerifyResult
 from .target import Environment, IntegrationTarget
 
 _PROMPTS = Path(__file__).parent / "prompts"
-_REVIEW_LOG_TAIL = 3000
 _LICENSE = ("By submitting this pull request, I confirm that my contribution is made under the terms of the "
             "Apache 2.0 license and the ISC license.")
 _SECRET_PATTERNS = (
@@ -110,11 +109,11 @@ class Harness:
         elif not self._follows_rules():
             verdict = ReviewVerdict(safe=False, findings=["The diff breaks a fixed rule: scope, secrets, or hidden text."])
         else:
-            logs = "\n\n".join(log.read_text()[-_REVIEW_LOG_TAIL:] for log in sorted((self.out / "logs").glob("*.log")))
-            message = (f"<logs>\n{logs}\n</logs>\n\n<diff>\n{self.diff}\n</diff>\n\n"
-                       f"<description>\n{self.description}\n</description>")
-            reviewer = Agent((_PROMPTS / "review.md").read_text())
-            verdict = reviewer(message, structured_output_model=ReviewVerdict).structured_output
+            logs = "\n\n".join(log.read_text() for log in sorted((self.out / "logs").glob("*.log")))
+            message = f"<diff>\n{self.diff}\n</diff>\n\n<description>\n{self.description}\n</description>"
+            reviewer = Agent((_PROMPTS / "review.md").read_text(), tools=[read_ci_logs])
+            verdict = reviewer(message, invocation_state={"logs": logs},
+                               structured_output_model=ReviewVerdict).structured_output
         (self.out / "review.json").write_text(verdict.model_dump_json(indent=2))
         return verdict
 

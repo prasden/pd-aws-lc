@@ -214,8 +214,7 @@ jobs:
       - *checkout
       - uses: actions/checkout@v7
         with:
-          repository: ${{ env.SOURCE_REPO }}
-          ref: ${{ matrix.target.awslc.sha }}
+          repository: prasden/pd-aws-lc
           path: aws-lc-fix
           fetch-depth: 0
           persist-credentials: false

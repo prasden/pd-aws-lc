@@ -12,7 +12,7 @@ from strands.sandbox.docker import DockerSandbox
 from .git import Git
 from .target import IntegrationTarget
 
-_RUNNER_TIMEOUT = 3600
+_RUNNER_TIMEOUT = 2 * 3600
 _CONTAINER_AWSLC = Path("/codebuild/output/aws-lc")
 _CONTAINER_SRC = Path("/autofix-src")
 # Integrations whose runner downloads more than the recorded repos, such as apt, pip, cargo, gradle, or submodules.

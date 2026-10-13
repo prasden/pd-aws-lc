@@ -81,7 +81,7 @@ jobs:
     runs-on: &codebuild
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
         image:${{ matrix.arch == 'aarch64' && 'arm-3.0' || 'linux-5.0' }}
-        instance-size:small
+        instance-size:${{ matrix.size }}
     permissions:
       contents: read
       actions: read

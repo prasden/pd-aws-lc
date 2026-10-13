@@ -15,7 +15,7 @@ from .sandbox import Sandbox, VerifyResult
 _AI_CONFIG = json.loads((Path(__file__).parents[4] / ".github/workflows/ai-config.json").read_text())
 _MODEL = f"bedrock/{_AI_CONFIG['opus']}"
 _LIMITS = Limits(turns=150, total_tokens=6_000_000)
-_TIMEOUT = 45 * 60
+_TIMEOUT = 3 * 3600
 _AWS_CREDENTIALS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")
 
 

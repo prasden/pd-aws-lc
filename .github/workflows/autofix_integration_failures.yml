@@ -41,11 +41,12 @@ jobs:
         with:
           persist-credentials: false
       - &setup-python
-        uses: actions/setup-python@v7
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.13"
+          activate-environment: true
       - &install
-        run: pip install -r tests/ci/integration/autofix/requirements.txt
+        run: uv pip install -r tests/ci/integration/autofix/requirements.txt
       - uses: actions/download-artifact@v8
         with:
           pattern: integration-failure-*

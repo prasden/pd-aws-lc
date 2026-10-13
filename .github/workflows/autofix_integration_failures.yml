@@ -75,7 +75,7 @@ jobs:
     if: needs.recognize.outputs.reason != '[]'
     strategy: &per-target
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 10
       matrix:
         include: ${{ fromJSON(needs.recognize.outputs.reason) }}
     runs-on: &codebuild
@@ -154,7 +154,7 @@ jobs:
     if: ${{ !cancelled() && needs.recognize.result == 'success' && needs.recognize.outputs.verify != '[]' }}
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 10
       matrix:
         include: ${{ fromJSON(needs.recognize.outputs.verify) }}
     runs-on: *codebuild

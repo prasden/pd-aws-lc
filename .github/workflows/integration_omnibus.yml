@@ -29,19 +29,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # tpm2-tss Integration Tests
-          - name: tpm2-tss
-            arch: x86_64
-            size: small
-            image: ubuntu:22.04
-            compiler: gcc-12
-            run: ./tests/ci/integration/run_tpm2_tss_integration.sh
-          - name: openssh-master
-            arch: x86_64
-            size: small
-            image: amazonlinux:2023
-            compiler: clang-15
-            run: ./tests/ci/integration/run_openssh_integration.sh master
           - name: nginx
             arch: x86_64
             size: medium
@@ -49,12 +36,63 @@ jobs:
             compiler: gcc-12
             user: postgres
             run: ./tests/ci/integration/run_nginx_integration.sh
-          - name: pyopenssl
+          - name: openssh-10.4p1
+            arch: x86_64
+            size: small
+            image: amazonlinux:2023
+            compiler: clang-15
+            run: ./tests/ci/integration/run_openssh_integration.sh V_10_4_P1
+          - name: openssh-10.4p1
+            arch: aarch64
+            size: 2xlarge
+            image: amazonlinux:2023
+            compiler: clang-15
+            run: ./tests/ci/integration/run_openssh_integration.sh V_10_4_P1
+          - name: postgresql
             arch: x86_64
             size: medium
             image: ubuntu:22.04
             compiler: gcc-12
-            run: ./tests/ci/integration/run_pyopenssl_integration.sh '25.3.0'
+            user: postgres
+            run: ./tests/ci/integration/run_postgres_integration.sh
+          - name: postgresql
+            arch: aarch64
+            size: large
+            image: ubuntu:22.04
+            compiler: gcc-12
+            user: postgres
+            run: ./tests/ci/integration/run_postgres_integration.sh
+          - name: mariadb
+            arch: x86_64
+            size: 2xlarge
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_mariadb_integration.sh
+          - name: mariadb
+            arch: aarch64
+            size: 2xlarge
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_mariadb_integration.sh
+          - name: librelp
+            arch: x86_64
+            size: small
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_librelp_integration.sh v1.13
+          - name: krb5
+            arch: x86_64
+            size: small
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_krb5_integration.sh krb5-1.22.2-final
+          - name: grpc
+            arch: x86_64
+            size: 2xlarge
+            image: ubuntu:22.04
+            compiler: gcc-12
+            ipv6: true
+            run: ./tests/ci/integration/run_grpc_integration.sh v1.72.2
     env:
       ACCP_FIPS: ${{ matrix.accp_fips || '' }}
     steps:
@@ -150,7 +188,7 @@ jobs:
             source /opt/compiler-env/setup-gcc-12.sh
             ./tests/ci/integration/run_python_integration.sh ${{ matrix.version }}
       - name: Record job settings
-        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule' && hashFiles('integration-failure.txt') != ''
+        if: always() && steps.integration-test.outcome == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && hashFiles('integration-failure.txt') != ''
         env:
           MATRIX: ${{ toJSON(matrix) }}
           JOB_ID: ${{ job.check_run_id }}
@@ -159,14 +197,13 @@ jobs:
             compiler: "gcc-12", ipv6: true, env_vars: (env | {FIPS, AWS_CRT_BUILD_USE_SYSTEM_LIBCRYPTO})} + .' \
             <<< "$MATRIX")" >> integration-failure.txt
       - uses: actions/upload-artifact@v7
-        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule'
+        if: always() && steps.integration-test.outcome == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         with:
           name: integration-failure-python-${{ matrix.version }}-${{ matrix.buildFIPS }}-${{ matrix.crtUseSystemCrypto }}-${{ matrix.arch }}
           path: integration-failure.txt
           if-no-files-found: ignore
 
   ruby:
-    if: false
     name: ruby-${{ matrix.version }}${{ matrix.buildFIPS == 1 && '-fips' || '' }}-${{ matrix.arch }}
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
@@ -176,11 +213,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: ["x86_64"]
-        version:
-          - master
-          - ruby_3_2
-          - ruby_3_3
-          - ruby_3_4
+        version: [master]
         buildFIPS: [0, 1]
     env:
       FIPS: ${{ matrix.buildFIPS }}
@@ -202,7 +235,7 @@ jobs:
             source /opt/compiler-env/setup-gcc-13.sh
             ./tests/ci/integration/run_ruby_integration.sh ${{ matrix.version }}
       - name: Record job settings
-        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule' && hashFiles('integration-failure.txt') != ''
+        if: always() && steps.integration-test.outcome == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && hashFiles('integration-failure.txt') != ''
         env:
           MATRIX: ${{ toJSON(matrix) }}
           JOB_ID: ${{ job.check_run_id }}
@@ -210,7 +243,7 @@ jobs:
           echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), size: "medium", image: "ubuntu:24.04",
             compiler: "gcc-13", ipv6: true, env_vars: (env | {FIPS})} + .' <<< "$MATRIX")" >> integration-failure.txt
       - uses: actions/upload-artifact@v7
-        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule'
+        if: always() && steps.integration-test.outcome == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         with:
           name: integration-failure-ruby-${{ matrix.version }}-${{ matrix.buildFIPS }}-${{ matrix.arch }}
           path: integration-failure.txt

@@ -38,7 +38,8 @@ def recognize(reports: list[str], awslc: Repo) -> dict[str, list[dict]]:
     for target in _parse_reports(reports, awslc):
         first, *others = sorted(target.arches, key=lambda arch: arch != "x86_64")
         for stage, arch in [("reason", first), *(("verify", arch) for arch in others)]:
-            matrix[stage].append({"name": target.dir_name, "arch": arch, "target": target.model_dump(mode="json")})
+            matrix[stage].append({"name": target.dir_name, "arch": arch, "size": target.size(arch),
+                                  "target": target.model_dump(mode="json")})
     return matrix
 
 

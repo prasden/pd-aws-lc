@@ -1,6 +1,6 @@
 import shlex
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, Field
 
@@ -9,12 +9,14 @@ from .git import Repo
 # Allow only characters that cannot break out of a shell word, because downstream tests can rewrite the report.
 _SHELL_SAFE = r"^[A-Za-z0-9._:-]*$"
 Arch = Literal["x86_64", "aarch64"]
+Size = Literal["small", "medium", "large", "xlarge", "2xlarge"]
 
 
 class Environment(BaseModel, frozen=True):
     image: str = Field(pattern=_SHELL_SAFE)
     compiler: str = Field(pattern=_SHELL_SAFE)
     arch: Arch
+    size: Size
     job_id: int = 0
     user: str = Field("", pattern=_SHELL_SAFE)
     ipv6: bool = False
@@ -49,6 +51,11 @@ class IntegrationTarget(BaseModel):
 
     def on(self, arch: str) -> list[Environment]:
         return [env for env in self.environments if env.arch == arch]
+
+    # Pick the largest CodeBuild instance size among the failed CI jobs on one arch, so replays run as fast as CI.
+    # Example: mysql jobs on 2xlarge give 2xlarge.
+    def size(self, arch: str) -> Size:
+        return max((env.size for env in self.on(arch)), key=get_args(Size).index)
 
     # Build the bash script a failed CI job ran from the aws-lc root, with the aws CLI stubbed out and as the job's user.
     def script(self, env: Environment) -> str:

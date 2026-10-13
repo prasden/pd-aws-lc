@@ -81,7 +81,7 @@ class Git:
 
     def diff(self, paths: list[Path]) -> str:
         self.run("add", "--intent-to-add", "--", *map(str, paths))
-        return self.run("diff", "--no-renames", "--", *map(str, paths))
+        return self.run("diff", "HEAD", "--no-renames", "--", *map(str, paths))
 
     def apply(self, diff: str) -> None:
         if diff:

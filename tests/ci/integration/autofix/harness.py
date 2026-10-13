@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 import unicodedata
@@ -21,6 +22,7 @@ _SECRET_PATTERNS = (
     re.compile(r"\b(?:Bearer|Authorization:)\s+[A-Za-z0-9._\-]{20,}"),
     re.compile(r"https?://\S*\.(?:amazon|a2z|aws\.dev|corp)\b\S*"),
 )
+_URL = re.compile(r"https?://[^\s<>()\[\]`'\"]+")
 _INVISIBLE_CATEGORIES = {"Cc", "Cf", "Cn", "Zl", "Zp"}
 
 
@@ -80,7 +82,10 @@ class Harness:
             name=self.target.name,
             version=self.target.version,
             root=str(sandbox.root),
-            repos=", ".join(f"`src/{repo.name}` ({repo.url} at {repo.sha})" for repo in self.target.repos),
+            awslc=f"{self.target.awslc.web} at `{self.target.awslc.sha}`",
+            jobs=", ".join(f"`out/logs/{env.job_id}.log` ({self.target.awslc.web}/runs/{env.job_id})"
+                           for env in self.target.environments if env.job_id),
+            repos=", ".join(f"`src/{repo.name}` ({repo.web} at `{repo.sha}`)" for repo in self.target.repos),
             editable=", ".join(f"`aws-lc/{path}`" for path in sandbox.editable),
         )
         with sandbox.agent_container() as container:
@@ -92,6 +97,7 @@ class Harness:
 
         (self.out / "changes.diff").write_text(sandbox.awslc.diff(sandbox.editable))
         (self.out / "description.md").write_text(str(final_message))
+        (self.out / "transcript.json").write_text(json.dumps(agent.messages, indent=2, default=str))
         return self.verify(sandbox)
 
     # Replay the fix in changes.diff on this runner's arch and save the result, after the agent or on a second arch.
@@ -130,7 +136,17 @@ class Harness:
         (self.out / "pr.md").write_text(f"{self.description.strip()}\n\n{_LICENSE}\n")
         return {"branch": branch, "title": f"[autofix] {title}"}
 
-    # Check for secrets leakage, hidden text, or edits outside the integration/ directory. 
+    # Match a GitHub permalink to a commit, a file at the tested commit, or a failed CI job of the target's repos.
+    # Example: https://github.com/aws/aws-lc/runs/115492504715 or <tpm2-tss URL>/commit/<40-hex SHA>.
+    @property
+    def _permalink(self) -> re.Pattern:
+        awslc = self.target.awslc
+        files = (rf"{re.escape(repo.web)}/(?:commit/[0-9a-f]{{40}}|blob/{repo.sha}/[\w./-]+(?:#L\d+(?:-L\d+)?)?)"
+                 for repo in [awslc, *self.target.repos])
+        jobs = "|".join(str(env.job_id) for env in self.target.environments if env.job_id)
+        return re.compile("|".join([*files, rf"{re.escape(awslc.web)}/runs/(?:{jobs})"]))
+
+    # Check for secrets leakage, hidden text, links that are not permalinks, or edits outside the integration/ directory.
     # A hardening for defense in depth. 
     def _follows_rules(self) -> bool:
         diff = self.diff
@@ -142,6 +158,7 @@ class Harness:
         return (
             all(path == runner or (path.suffix == ".patch" and path.is_relative_to(runner.parent))
                 for path in Git.changed_paths(diff))
+            and all(self._permalink.fullmatch(url.rstrip(".,:;")) for url in _URL.findall(self.description))
             and not any(pattern.search(text) for pattern in _SECRET_PATTERNS)
             and not any(unicodedata.category(char) in _INVISIBLE_CATEGORIES and char not in "\t\n\r" for char in text)
         )

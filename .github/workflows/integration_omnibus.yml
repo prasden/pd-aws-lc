@@ -36,6 +36,25 @@ jobs:
             image: ubuntu:22.04
             compiler: gcc-12
             run: ./tests/ci/integration/run_tpm2_tss_integration.sh
+          - name: openssh-master
+            arch: x86_64
+            size: small
+            image: amazonlinux:2023
+            compiler: clang-15
+            run: ./tests/ci/integration/run_openssh_integration.sh master
+          - name: nginx
+            arch: x86_64
+            size: medium
+            image: ubuntu:22.04
+            compiler: gcc-12
+            user: postgres
+            run: ./tests/ci/integration/run_nginx_integration.sh
+          - name: pyopenssl
+            arch: x86_64
+            size: medium
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_pyopenssl_integration.sh '25.3.0'
     env:
       ACCP_FIPS: ${{ matrix.accp_fips || '' }}
     steps:

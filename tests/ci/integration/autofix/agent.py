@@ -40,6 +40,10 @@ class Agent:
         for name in _AWS_CREDENTIALS:
             os.environ.pop(name, None)
 
+    @property
+    def messages(self) -> list[dict]:
+        return self._agent.messages
+
     def __call__(self, message: str, **kwargs: Any) -> AgentResult:
         """Run the agent within its turn and token limits, cancelling it when the timeout passes."""
         deadline = threading.Event()

@@ -209,10 +209,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     env: *target
     steps:
+      - name: Skip a target that already has an open autofix PR
+        id: open-pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: autofix/${{ matrix.name }}
+        run: |
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json url --jq '.[0].url')
+          [ -z "$pr" ] || echo "::notice::$BRANCH already has an open PR: $pr"
+          echo "url=$pr" >> "$GITHUB_OUTPUT"
       - *checkout
-      - uses: actions/checkout@v7
+      - if: &no-open-pr steps.open-pr.outputs.url == ''
+        uses: actions/checkout@v7
         with:
           repository: prasden/pd-aws-lc
           path: aws-lc-fix
@@ -223,12 +234,14 @@ jobs:
       - *results
       - name: Commit the fix
         id: commit
+        if: *no-open-pr
         working-directory: tests/ci/integration
         run: |
           pr=$(python -m autofix resolve --checkout "$GITHUB_WORKSPACE/aws-lc-fix")
           jq -r '"branch=\(.branch)", "title=\(.title)"' <<< "$pr" >> "$GITHUB_OUTPUT"
       - uses: actions/create-github-app-token@v2
         id: fork-token
+        if: *no-open-pr
         with:
           app-id: ${{ vars.AUTOFIX_APP_ID }}
           private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
@@ -237,6 +250,7 @@ jobs:
           permission-contents: write
       - uses: actions/create-github-app-token@v2
         id: upstream-token
+        if: *no-open-pr
         with:
           app-id: ${{ vars.AUTOFIX_APP_ID }}
           private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
@@ -244,6 +258,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-pull-requests: write
       - name: Push the fix to the fork and open a draft PR
+        if: *no-open-pr
         env:
           FORK_TOKEN: ${{ steps.fork-token.outputs.token }}
           UPSTREAM_TOKEN: ${{ steps.upstream-token.outputs.token }}

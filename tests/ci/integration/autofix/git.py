@@ -28,6 +28,10 @@ class Repo:
     def name(self) -> str:
         return Path(self.url).name.removesuffix(".git")
 
+    @property
+    def web(self) -> str:
+        return self.url.removesuffix(".git")
+
 
 # Run git in one folder with no credentials, config files, hooks, prompts, symlinks, or ext/fd protocols.
 class Git:

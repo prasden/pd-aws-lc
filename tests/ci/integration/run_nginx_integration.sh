@@ -37,7 +37,7 @@ function nginx_build() {
     --with-stream \
     --with-stream_realip_module \
     --with-stream_ssl_module \
-    --with-stream_ssl_preread_module \
+    --with-stream_ssl_preread \
     --with-mail \
     --with-mail_ssl_module \
     --with-cc-opt="-I${AWS_LC_INSTALL_FOLDER}/include" \

@@ -56,6 +56,6 @@ class IntegrationTarget(BaseModel):
         run = f"./{self.runner} {shlex.quote(self.version)}"
         script = f"aws() {{ :; }}; export -f aws; [ -f {setup} ] && source {setup}; {run}"
         if env.user:
-            script = (f"mkdir -p /home/{env.user}; chown -R {env.user} /home/{env.user} . 2>/dev/null; "
+            script = (f"mkdir -p /home/{env.user}; chown -R {env.user} /home/{env.user} .. 2>/dev/null; "
                       f"su -p {env.user} -c {shlex.quote(script)}")
         return script

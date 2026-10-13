@@ -15,7 +15,7 @@ from .git import Git
 from .target import IntegrationTarget
 
 _RUNNER_TIMEOUT = 3600
-_CONTAINER_AWSLC = Path("/aws-lc")
+_CONTAINER_AWSLC = Path("/codebuild/output/aws-lc")
 _CONTAINER_SRC = Path("/autofix-src")
 _PROXY_IMAGE = ("public.ecr.aws/docker/library/python:3.13-alpine"
                 "@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a")

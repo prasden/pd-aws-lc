@@ -64,10 +64,7 @@ MariaDB skip list.
 4. Each time you think you have a working patch, call run_integration. It replays every failed CI job on a fresh copy
    of AWS-LC with your current changes, exactly as CI ran them, and returns each job's exit code and output.
 5. If any job exits with a code other than 0, read its output, find the new failure, fix it, and call run_integration
-   again. Repeat until every job exits with 0. A job that runs past an hour returns a timeout error.
-   Each job reaches the network only through a proxy that allows the hosts this integration already uses. The
-   `egress proxy:` part of each job's output lists every denied host. You MUST NOT work around a denied host.
-6. Each call can take up to an hour, so you SHOULD dry-run patches and check your edits before you call it. You
+   again. Repeat until every job exits with 0. A job that runs past an hour returns a timeout error.6. Each call can take up to an hour, so you SHOULD dry-run patches and check your edits before you call it. You
    SHOULD NOT call it again before you change something.
 7. You MUST NOT stop while a job fails unless you cannot find a correct fix. When you stop, the harness replays
    the jobs itself, and only a patch that passes every job goes on to review.

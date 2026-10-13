@@ -394,9 +394,7 @@ jobs:
             compiler: gcc-12
             ipv6: true
             options: --privileged
-            run: |
-              python3 -m pip install --upgrade meson
-              ./tests/ci/integration/run_bind9_integration.sh
+            run: ./tests/ci/integration/run_bind9_integration.sh
 
           # strongSwan Integration Tests
           - name: strongswan
@@ -634,16 +632,3 @@ jobs:
             --namespace AWS-LC \
             --metric-name IntegrationOmnibusFailure \
             --value "$failure_count"
-
-  autofix:
-    name: autofix
-    needs: [integrations, python, ruby, report-failures]
-    if: >-
-      always() && github.event_name == 'schedule' &&
-      (needs.integrations.result == 'failure' || needs.python.result == 'failure' || needs.ruby.result == 'failure')
-    permissions:
-      contents: read
-      actions: read
-      id-token: write
-    uses: ./.github/workflows/autofix_integration_failures.yml
-    secrets: inherit

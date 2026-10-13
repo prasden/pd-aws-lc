@@ -1,27 +1,16 @@
-import asyncio
-import json
+import logging
 import re
-import threading
-from datetime import date
-from functools import partial
-from itertools import count
+import unicodedata
 from pathlib import Path
 
 from pydantic import BaseModel
-from strands import tool
-from strands.hooks import AfterInvocationEvent
-from strands.tools.executors import SequentialToolExecutor
-from strands.types.agent import Limits
-from strands_harness import create_harness
 
-from . import git
-from .github_client import GitHubClient
-from .integration import IntegrationTarget, Sandbox
+from .agent import Agent, run_integration
+from .git import Git, Repo
+from .sandbox import Sandbox, VerifyResult
+from .target import Environment, IntegrationTarget
 
-_AI_CONFIG = json.loads((Path(__file__).parents[4] / ".github/workflows/ai-config.json").read_text())
-_MAX_TRIES = 3
-_AGENT_TIMEOUT = 45 * 60
-_AGENT_LIMITS = Limits(turns=150, total_tokens=6_000_000)
+_PROMPTS = Path(__file__).parent / "prompts"
 _REVIEW_LOG_TAIL = 3000
 _LICENSE = ("By submitting this pull request, I confirm that my contribution is made under the terms of the "
             "Apache 2.0 license and the ISC license.")
@@ -33,165 +22,127 @@ _SECRET_PATTERNS = (
     re.compile(r"\b(?:Bearer|Authorization:)\s+[A-Za-z0-9._\-]{20,}"),
     re.compile(r"https?://\S*\.(?:amazon|a2z|aws\.dev|corp)\b\S*"),
 )
-# Match characters that hide text from people but not from models, except tab, newline, and carriage return.
-# Example: zero-width spaces, bidi overrides, and U+E0000 tag characters that spell out hidden instructions.
-_INVISIBLE_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\xad\U0000200b-\U0000200f\U00002028-\U0000202e"
-                                   r"\U00002060-\U00002064\U00002066-\U00002069\U0000feff\U000e0000-\U000e007f]")
-# Build a harness with no plugins, memory, sessions, skills, or background tasks, running one tool at a time.
-# Example: two run_integration calls in one turn run one after the other instead of racing for one CI container name.
-_bare_harness = partial(create_harness, model=f"bedrock/{_AI_CONFIG['opus']}", builtin_plugins=[], session=False,
-                        memory=False, skills=False, background_tasks=False, tool_executor=SequentialToolExecutor())
-
-
-def _prompt(name: str) -> str:
-    return (Path(__file__).parent / "prompts" / f"{name}.md").read_text()
-
-
-# Apply the fixed rules no reviewer verdict can override: a non-empty diff of only patches and the runner, no secrets,
-# and no hidden text. Example: a diff that touches CMakeLists.txt or holds a zero-width space fails.
-def _follows_rules(diff: str, description: str, changed_files: list[Path], runner: Path) -> bool:
-    text = diff + description
-    has_secret = any(pattern.search(text) for pattern in _SECRET_PATTERNS)
-    hides_text = _INVISIBLE_CHARACTERS.search(text)
-    only_patches = all(path == runner or path.suffix == ".patch" for path in changed_files)
-    return bool(diff) and only_patches and not has_secret and not hides_text
+_INVISIBLE_CATEGORIES = {"Cc", "Cf", "Cn", "Zl", "Zp"}
 
 
 class ReviewVerdict(BaseModel):
     safe: bool
+    findings: list[str] = []
 
 
-class VerifyResult(BaseModel):
-    passed: bool
+# Build the job matrix from integration-failure.txt reports: one reason job per target on x86_64 when it failed there,
+# and one verify job for its other failed arch. Example: ruby failing on both arches reasons on x86_64, verifies aarch64.
+def recognize(reports: list[str], awslc: Repo) -> dict[str, list[dict]]:
+    matrix = {"reason": [], "verify": []}
+    for target in _parse_reports(reports, awslc):
+        first, *others = sorted(target.arches, key=lambda arch: arch != "x86_64")
+        for stage, arch in [("reason", first), *(("verify", arch) for arch in others)]:
+            matrix[stage].append({"name": target.dir_name, "arch": arch, "target": target.model_dump(mode="json")})
+    return matrix
+
+
+# Group integration-failure.txt reports into one target per integration and version, skipping any bad report.
+def _parse_reports(reports: list[str], awslc: Repo) -> list[IntegrationTarget]:
+    targets: dict[tuple[str, str], IntegrationTarget] = {}
+    for report in sorted(reports):
+        try:
+            head, *lines = report.splitlines()
+            name, version = head.split("\t")
+            repos = [Repo(*line.removeprefix("commit=").split()) for line in lines if line.startswith("commit=")]
+            env = Environment.model_validate_json(lines[-1].removeprefix("job="))
+            target = targets.setdefault((name, version), IntegrationTarget(
+                name=name, version=version, awslc=awslc, repos=repos, environments=[]))
+        except (ValueError, IndexError) as error:
+            logging.warning("skipping a bad integration-failure.txt: %s", error)
+            continue
+        target.environments.append(env)
+    return list(targets.values())
 
 
 class Harness:
-    def __init__(self, work_dir: Path):
+    def __init__(self, work_dir: Path, target: IntegrationTarget):
         self.work_dir = work_dir.resolve()
+        self.target = target
+        self.out = self.work_dir / "out"
+        self.out.mkdir(parents=True, exist_ok=True)
 
-    def sandbox(self, target: IntegrationTarget) -> Sandbox:
-        return Sandbox(self.work_dir / target.dir_name)
+    @property
+    def diff(self) -> str:
+        return (self.out / "changes.diff").read_text()
 
-    # Load a target saved by recognize, refusing a name that does not match the target it names.
-    # Example: load("ruby-master") reads ruby-master/target.json, and load("../x") raises ValueError.
-    def load(self, dir_name: str) -> IntegrationTarget:
-        target = IntegrationTarget.load(self.work_dir / dir_name / "target.json")
-        if target.dir_name != dir_name:
-            raise ValueError(f"target.json in {dir_name!r} names {target.dir_name!r}")
-        return target
+    @property
+    def description(self) -> str:
+        return (self.out / "description.md").read_text()
 
-    def recognize(self, github: GitHubClient, run_id: int) -> list[str]:
-        targets = github.failure_targets(run_id)
-        for target in targets:
-            sandbox = self.sandbox(target)
-            sandbox.logs.mkdir(parents=True)
-            target.save(sandbox.root / "target.json")
-            for job_id, log in github.job_logs(run_id, target).items():
-                (sandbox.logs / f"{job_id}.log").write_text(log)
-            git.clone(target.awslc_repo, sandbox.awslc)
-            for repo in target.integration_repos:
-                git.clone(repo, sandbox.src / repo.name)
-        return [target.dir_name for target in targets]
-
-    def reason(self, target: IntegrationTarget, registry: str) -> ReviewVerdict:
-        sandbox = self.sandbox(target)
-        patch_dirs = target.patch_dirs(sandbox.awslc)
-        for patch_dir in patch_dirs:
-            patch_dir.mkdir(parents=True, exist_ok=True)
-        tries = count(1)
-
-        @tool
-        async def run_integration() -> str:
-            """Run every failed CI environment with the current patches and return each result and log tail."""
-            _, report = await target.run(sandbox, registry)
-            return report
-
-        # Run the integration after each finished agent pass and resume the agent with the failure, up to three passes.
-        # Example: a fix that still fails on aarch64 resumes the agent with the aarch64 log tail.
-        async def rerun_until_green(event: AfterInvocationEvent) -> None:
-            if event.result and event.result.stop_reason == "end_turn" and next(tries) < _MAX_TRIES:
-                passed, report = await target.run(sandbox, registry)
-                if not passed:
-                    event.resume = _prompt("retry").format(results=report)
-
-        repos = [f"`{sandbox.src / repo.name}` ({repo.url} at {repo.sha})" for repo in target.integration_repos]
-        prompt = _prompt("task").format(
-            name=target.name,
-            version=target.version or "(none)",
-            sandbox_dir=sandbox.root,
-            repos=", ".join(repos) or "(none recorded)",
-            runner=target.runner(sandbox.awslc),
-            patch_dirs=", ".join(f"`{patch_dir}`" for patch_dir in patch_dirs),
+    # Let the agent repair the target with run_integration as its feedback loop, then record whether the final patch passes.
+    def reason(self, registry: str) -> VerifyResult:
+        sandbox = Sandbox(self.work_dir, self.target, registry)
+        instructions = (_PROMPTS / "agent.md").read_text().format(
+            name=self.target.name,
+            version=self.target.version,
+            root=str(sandbox.root),
+            repos=", ".join(f"`src/{repo.name}` ({repo.url} at {repo.sha})" for repo in self.target.repos),
+            editable=", ".join(f"`aws-lc/{path}`" for path in sandbox.editable),
         )
-        with target.agent_container(sandbox, registry).start() as container:
-            agent = _bare_harness(
-                instructions=_prompt("system"),
-                sandbox=container,
-                tools=[run_integration],
-                hooks=[rerun_until_green],
-                builtin_tools=["shell", "read", "write", "edit"],
-            )
-            deadline = threading.Event()
-            timer = threading.Timer(_AGENT_TIMEOUT, deadline.set)
-            timer.start()
-            try:
-                final_message = agent(prompt, limits=_AGENT_LIMITS, cancel_signal=deadline)
-            finally:
-                timer.cancel()
+        with sandbox.agent_container() as container:
+            agent = Agent(instructions,
+                          sandbox=container,
+                          tools=[run_integration],
+                          builtin_tools=["shell", "read", "write", "edit"])
+            final_message = agent("Start by reading the logs.", invocation_state={"sandbox": sandbox})
 
-        sandbox.out.mkdir(exist_ok=True)
-        (sandbox.out / "description.md").write_text(str(final_message))
-        return self.review(target)
+        (self.out / "changes.diff").write_text(sandbox.awslc.diff(sandbox.editable))
+        (self.out / "description.md").write_text(str(final_message))
+        return self.verify(sandbox)
 
-    def review(self, target: IntegrationTarget) -> ReviewVerdict:
-        sandbox = self.sandbox(target)
-        allowed_paths = target.writable(sandbox.awslc)
-        diff = git.diff(sandbox.awslc, allowed_paths)
-        description = (sandbox.out / "description.md").read_text()
-        log_tails = [log.read_text()[-_REVIEW_LOG_TAIL:] for log in sorted(sandbox.logs.glob("*.log"))]
-
-        reviewer = _bare_harness(system_prompt=_prompt("review"), builtin_tools=[], callback_handler=None)
-        verdict = reviewer(
-            _prompt("review_task").format(logs="\n\n".join(log_tails), diff=diff, description=description),
-            structured_output_model=ReviewVerdict,
-        ).structured_output
-
-        changed_files = git.changed_files(sandbox.awslc, allowed_paths)
-        follows_rules = _follows_rules(diff, description, changed_files, target.runner(sandbox.awslc))
-        final = ReviewVerdict(safe=verdict.safe and follows_rules)
-        (sandbox.out / "changes.diff").write_text(diff)
-        (sandbox.out / "review.json").write_text(final.model_dump_json(indent=2))
-        return final
-
-    def verify(self, target: IntegrationTarget, registry: str) -> VerifyResult:
-        sandbox = self.sandbox(target)
-        git.apply(sandbox.awslc, sandbox.out / "changes.diff")
-        passed, report = asyncio.run(target.run(sandbox, registry))
-
-        sandbox.verify.mkdir(exist_ok=True)
-        (sandbox.verify / "report.log").write_text(report)
-        result = VerifyResult(passed=passed)
-        (sandbox.verify / "verify.json").write_text(result.model_dump_json(indent=2))
+    # Replay the fix in changes.diff on this runner's arch and save the result, after the agent or on a second arch.
+    def verify(self, sandbox: Sandbox) -> VerifyResult:
+        result = sandbox.replay(self.diff)
+        (self.out / f"verify-{sandbox.jobs[0].arch}.json").write_text(result.model_dump_json(indent=2))
         return result
 
-    # Commit the reviewed and verified fix onto the failing aws-lc commit, push it to the fork, and open a draft PR.
-    # Example: ruby master opens autofix/2026-10-09-ruby-master, and an unverified fix raises PermissionError.
-    def resolve(self, target: IntegrationTarget, github: GitHubClient, fork: str) -> str:
-        sandbox = self.sandbox(target)
-        diff = (sandbox.out / "changes.diff").read_text()
-        description = (sandbox.out / "description.md").read_text()
-        git.apply(sandbox.awslc, sandbox.out / "changes.diff")
+    # Judge a verified fix with the fixed rules, then with a reviewer model that sees only the diff, description, and logs.
+    def review(self) -> ReviewVerdict:
+        verified = all(VerifyResult.model_validate_json((self.out / f"verify-{arch}.json").read_text()).passed
+                       for arch in self.target.arches)
+        if not verified:
+            verdict = ReviewVerdict(safe=False, findings=["The fix did not pass every failed CI job."])
+        elif not self._follows_rules():
+            verdict = ReviewVerdict(safe=False, findings=["The diff breaks a fixed rule: scope, secrets, or hidden text."])
+        else:
+            logs = "\n\n".join(log.read_text()[-_REVIEW_LOG_TAIL:] for log in sorted((self.out / "logs").glob("*.log")))
+            message = (f"<logs>\n{logs}\n</logs>\n\n<diff>\n{self.diff}\n</diff>\n\n"
+                       f"<description>\n{self.description}\n</description>")
+            reviewer = Agent((_PROMPTS / "review.md").read_text())
+            verdict = reviewer(message, structured_output_model=ReviewVerdict).structured_output
+        (self.out / "review.json").write_text(verdict.model_dump_json(indent=2))
+        return verdict
 
-        reviewed = ReviewVerdict.model_validate_json((sandbox.out / "review.json").read_text()).safe
-        verified = VerifyResult.model_validate_json((sandbox.verify / "verify.json").read_text()).passed
-        changed_files = git.changed_files(sandbox.awslc, [sandbox.awslc])
-        follows_rules = _follows_rules(diff, description, changed_files, target.runner(sandbox.awslc))
-        if not (reviewed and verified and follows_rules):
-            raise PermissionError(f"{target.dir_name}: the fix was not reviewed safe and verified")
+    # Commit a fix the review found safe onto the tested aws-lc commit, and write the PR body.
+    def resolve(self, checkout: Git) -> dict[str, str]:
+        if not ReviewVerdict.model_validate_json((self.out / "review.json").read_text()).safe:
+            raise PermissionError(f"{self.target.dir_name}: the fix was not reviewed safe")
 
-        branch = f"autofix/{date.today()}-{target.dir_name}"
-        title = f"Fix the {target.dir_name} integration patch"
-        git.commit(sandbox.awslc, branch, title)
-        git.unshallow(sandbox.awslc, target.awslc_repo)
-        github.push(sandbox.awslc, fork, branch)
-        return github.open_draft_pr(fork, branch, f"[autofix] {title}", f"{description.strip()}\n\n{_LICENSE}\n")
+        branch = f"autofix/{self.target.dir_name}"
+        title = f"Fix the {self.target.dir_name} integration patch"
+        checkout.apply(self.diff)
+        checkout.commit(branch, title)
+
+        (self.out / "pr.md").write_text(f"{self.description.strip()}\n\n{_LICENSE}\n")
+        return {"branch": branch, "title": f"[autofix] {title}"}
+
+    # Check for secrets leakage, hidden text, or edits outside the integration/ directory. 
+    # A hardening for defense in depth. 
+    def _follows_rules(self) -> bool:
+        diff = self.diff
+        if not diff:
+            return False
+        runner = self.target.runner
+        added = [line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++ ")]
+        text = "\n".join([*added, self.description])
+        return (
+            all(path == runner or (path.suffix == ".patch" and path.is_relative_to(runner.parent))
+                for path in Git.changed_paths(diff))
+            and not any(pattern.search(text) for pattern in _SECRET_PATTERNS)
+            and not any(unicodedata.category(char) in _INVISIBLE_CATEGORIES and char not in "\t\n\r" for char in text)
+        )

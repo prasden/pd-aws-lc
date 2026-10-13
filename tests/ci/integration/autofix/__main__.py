@@ -1,35 +1,55 @@
-import argparse
 import json
 from pathlib import Path
+from typing import Annotated
 
-from .github_client import GitHubClient
+import typer
+
+from .git import Git, Repo
+from . import harness
 from .harness import Harness
+from .sandbox import Sandbox
+from .target import IntegrationTarget
 
-with_target = argparse.ArgumentParser(add_help=False)
-with_target.add_argument("--target", required=True, help="Target folder name printed by recognize, e.g. ruby-master.")
-with_registry = argparse.ArgumentParser(add_help=False, parents=[with_target])
-with_registry.add_argument("--registry", required=True, help="Registry that holds the aws-lc CI images.")
+WorkDir = Annotated[Path, typer.Option(envvar="WORK_DIR", help="Directory for clones and results.")]
+Target = Annotated[IntegrationTarget, typer.Option(envvar="TARGET", parser=IntegrationTarget.model_validate_json,
+                                                   help="Target JSON from the recognize matrix.")]
+Registry = Annotated[str, typer.Option(envvar="ECR_REGISTRY", help="Registry that holds the aws-lc CI images.")]
 
-parser = argparse.ArgumentParser(prog="autofix")
-parser.add_argument("--work-dir", type=Path, required=True, help="Directory for sandboxes, logs, clones, and results.")
-commands = parser.add_subparsers(dest="command", required=True)
-recognize = commands.add_parser("recognize", help="Collect the failed targets, logs, and repos of an omnibus run.")
-recognize.add_argument("--repo", required=True, help="Repository of the omnibus run, e.g. aws/aws-lc.")
-recognize.add_argument("--run-id", type=int, required=True, help="ID of the omnibus run that failed.")
-commands.add_parser("reason", parents=[with_registry], help="Repair one target with the agent, then review the fix.")
-commands.add_parser("verify", parents=[with_registry], help="Replay the target's CI jobs on a clean clone with the fix.")
-resolve = commands.add_parser("resolve", parents=[with_target], help="Push a verified fix to the fork and open a draft PR.")
-resolve.add_argument("--repo", required=True, help="Repository to open the PR against, e.g. aws/aws-lc.")
-resolve.add_argument("--fork", required=True, help="Fork to push the branch to, e.g. prasden/pd-aws-lc.")
+app = typer.Typer(pretty_exceptions_enable=False)
 
-args = parser.parse_args()
-harness = Harness(args.work_dir)
-match args.command:
-    case "recognize":
-        print(json.dumps(harness.recognize(GitHubClient(args.repo), args.run_id)))
-    case "reason":
-        print(harness.reason(harness.load(args.target), args.registry).model_dump_json())
-    case "verify":
-        raise SystemExit(not harness.verify(harness.load(args.target), args.registry).passed)
-    case "resolve":
-        print(harness.resolve(harness.load(args.target), GitHubClient(args.repo), args.fork))
+
+@app.command()
+def recognize(reports: Annotated[Path, typer.Option(help="Directory of downloaded integration-failure artifacts.")],
+              awslc_repo: Annotated[str, typer.Option(help="aws-lc clone URL, e.g. https://github.com/aws/aws-lc.git.")],
+              awslc_sha: Annotated[str, typer.Option(help="aws-lc commit the omnibus run tested.")]) -> None:
+    """Print the job matrix for the failed targets of an omnibus run."""
+    texts = [report.read_text() for report in reports.rglob("integration-failure.txt")]
+    print(json.dumps(harness.recognize(texts, Repo(awslc_repo, awslc_sha))))
+
+
+@app.command()
+def reason(work_dir: WorkDir, target: Target, registry: Registry) -> None:
+    """Repair the target with the agent and verify the fix."""
+    raise typer.Exit(not Harness(work_dir, target).reason(registry).passed)
+
+
+@app.command()
+def verify(work_dir: WorkDir, target: Target, registry: Registry) -> None:
+    """Replay this runner's arch of failed CI jobs with the fix."""
+    raise typer.Exit(not Harness(work_dir, target).verify(Sandbox(work_dir, target, registry)).passed)
+
+
+@app.command()
+def review(work_dir: WorkDir, target: Target) -> None:
+    """Judge the verified fix with the rules and the reviewer."""
+    raise typer.Exit(not Harness(work_dir, target).review().safe)
+
+
+@app.command()
+def resolve(work_dir: WorkDir, target: Target,
+            checkout: Annotated[Path, typer.Option(help="Full aws-lc checkout at the tested commit.")]) -> None:
+    """Commit the fix and print its branch and PR title."""
+    print(json.dumps(Harness(work_dir, target).resolve(Git(checkout))))
+
+
+app()

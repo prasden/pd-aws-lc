@@ -54,16 +54,18 @@ class Git:
         numstat = Git(Path("/")).run("apply", "--numstat", "-", input=diff)
         return [Path(line.split("\t")[-1]) for line in numstat.splitlines()]
 
-    # Clone the repo at its SHA, then point every remote branch and tag at that SHA so a runner cloning a named ref gets it.
+    # Clone the repo at its SHA with its real tags, then point every remote branch at that SHA so a runner cloning a
+    # branch gets it. Example: git describe still finds tpm2-tss's real release tag, and git clone --branch master
+    # checks out the failing commit.
     @classmethod
     def clone(cls, repo: Repo, path: Path) -> Self:
         path.mkdir(parents=True)
         git = cls(path)
         git.run("init", "-q")
-        git.run("fetch", "-q", "--no-tags", "--depth", "500", repo.url, repo.sha)
+        git.run("fetch", "-q", "--tags", "--depth", "500", repo.url, repo.sha)
         git.run("checkout", "-q", "FETCH_HEAD")
-        refs = git.run("ls-remote", "--heads", "--tags", "--refs", repo.url).splitlines()
-        git.run("update-ref", "--stdin", input="".join(f"update {ref.partition('\t')[2]} {repo.sha}\n" for ref in refs))
+        branches = git.run("ls-remote", "--heads", repo.url).splitlines()
+        git.run("update-ref", "--stdin", input="".join(f"update {ref.partition('\t')[2]} {repo.sha}\n" for ref in branches))
         return git
 
     # Copy HEAD into a new folder under parent, so a CI replay cannot dirty this checkout.

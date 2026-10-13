@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ _AI_CONFIG = json.loads((Path(__file__).parents[4] / ".github/workflows/ai-confi
 _MODEL = f"bedrock/{_AI_CONFIG['opus']}"
 _LIMITS = Limits(turns=150, total_tokens=6_000_000)
 _TIMEOUT = 45 * 60
+_AWS_CREDENTIALS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")
 
 
 class Agent:
@@ -33,6 +35,10 @@ class Agent:
             "background_tasks": False,
             "tool_executor": SequentialToolExecutor(),
         } | options)
+        # The Bedrock client read the AWS credentials when the harness built it, so drop them from the environment
+        # before the agent runs. Example: docker exec and every other subprocess started after this sees no AWS keys.
+        for name in _AWS_CREDENTIALS:
+            os.environ.pop(name, None)
 
     def __call__(self, message: str, **kwargs: Any) -> AgentResult:
         """Run the agent within its turn and token limits, cancelling it when the timeout passes."""

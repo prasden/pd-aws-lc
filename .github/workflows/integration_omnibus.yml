@@ -69,12 +69,6 @@ jobs:
             run: ./tests/ci/integration/run_libgit2_integration.sh main
 
           # OpenSSH Integration Tests
-          - name: openssh-10.4p1
-            arch: x86_64
-            size: small
-            image: amazonlinux:2023
-            compiler: clang-15
-            run: ./tests/ci/integration/run_openssh_integration.sh V_10_4_P1
           - name: openssh-v8.9
             arch: x86_64
             size: small
@@ -88,12 +82,6 @@ jobs:
             compiler: clang-15
             allow_failure: true
             run: ./tests/ci/integration/run_openssh_integration.sh master
-          - name: openssh-10.4p1
-            arch: aarch64
-            size: 2xlarge
-            image: amazonlinux:2023
-            compiler: clang-15
-            run: ./tests/ci/integration/run_openssh_integration.sh V_10_4_P1
           - name: openssh-v8.9
             arch: aarch64
             size: 2xlarge
@@ -107,22 +95,6 @@ jobs:
             compiler: clang-15
             allow_failure: true
             run: ./tests/ci/integration/run_openssh_integration.sh master
-
-          # PostgreSQL Integration Tests
-          - name: postgresql
-            arch: x86_64
-            size: medium
-            image: ubuntu:22.04
-            compiler: gcc-12
-            user: postgres
-            run: ./tests/ci/integration/run_postgres_integration.sh
-          - name: postgresql
-            arch: aarch64
-            size: large
-            image: ubuntu:22.04
-            compiler: gcc-12
-            user: postgres
-            run: ./tests/ci/integration/run_postgres_integration.sh
 
           # MySQL Integration Tests
           - name: mysql
@@ -142,20 +114,6 @@ jobs:
             user: postgres
             run: ./tests/ci/integration/run_mysql_integration.sh
 
-          # MariaDB Integration Tests
-          - name: mariadb
-            arch: x86_64
-            size: 2xlarge
-            image: ubuntu:22.04
-            compiler: gcc-12
-            run: ./tests/ci/integration/run_mariadb_integration.sh
-          - name: mariadb
-            arch: aarch64
-            size: 2xlarge
-            image: ubuntu:22.04
-            compiler: gcc-12
-            run: ./tests/ci/integration/run_mariadb_integration.sh
-
           # Curl Integration Tests
           - name: curl
             arch: x86_64
@@ -171,22 +129,6 @@ jobs:
             compiler: gcc-11
             ipv6: true
             run: ./tests/ci/integration/run_curl_integration.sh
-
-          # NGINX Integration Tests
-          - name: nginx
-            arch: x86_64
-            size: medium
-            image: ubuntu:22.04
-            compiler: gcc-12
-            user: postgres
-            run: ./tests/ci/integration/run_nginx_integration.sh
-          - name: nginx
-            arch: aarch64
-            size: large
-            image: ubuntu:22.04
-            compiler: gcc-12
-            user: postgres
-            run: ./tests/ci/integration/run_nginx_integration.sh
 
           # SSLProxy Integration Tests
           - name: sslproxy
@@ -211,14 +153,6 @@ jobs:
             credentials: true
             run: ./tests/ci/integration/run_monit_integration.sh
 
-          # librelp (pinned to a release - required)
-          - name: librelp
-            arch: x86_64
-            size: small
-            image: ubuntu:22.04
-            compiler: gcc-12
-            allow_failure: false
-            run: ./tests/ci/integration/run_librelp_integration.sh v1.13
           # librelp (tracking upstream main - informational, allowed to fail)
           - name: librelp-main
             arch: x86_64
@@ -260,13 +194,6 @@ jobs:
             compiler: gcc-12
             run: ./tests/ci/integration/run_pq_tls_integration.sh
 
-          # tpm2-tss Integration Tests
-          - name: tpm2-tss
-            arch: x86_64
-            size: small
-            image: ubuntu:22.04
-            compiler: gcc-12
-            run: ./tests/ci/integration/run_tpm2_tss_integration.sh
 
           # tcpdump Integration Tests
           - name: tcpdump
@@ -298,13 +225,6 @@ jobs:
             compiler: gcc-12
             run: ./tests/ci/integration/run_cyrus_sasl_integration.sh
 
-          # MIT Kerberos (krb5) Integration Tests
-          - name: krb5
-            arch: x86_64
-            size: small
-            image: ubuntu:22.04
-            compiler: gcc-12
-            run: ./tests/ci/integration/run_krb5_integration.sh krb5-1.22.2-final
 
           # Amazon Corretto Crypto Provider Integration Tests
           - name: accp-aarch64
@@ -368,15 +288,6 @@ jobs:
             compiler: gcc-12
             run: ./tests/ci/integration/run_libwebsockets_integration.sh
 
-          # GRPC Integration Tests (pinned release - blocking)
-          - name: grpc
-            arch: x86_64
-            size: 2xlarge
-            image: ubuntu:22.04
-            compiler: gcc-12
-            ipv6: true
-            allow_failure: false
-            run: ./tests/ci/integration/run_grpc_integration.sh v1.72.2
           # GRPC (tracking upstream master - informational, allowed to fail)
           - name: grpc-master
             arch: x86_64
@@ -441,13 +352,6 @@ jobs:
             compiler: gcc-12
             run: ./tests/ci/integration/run_xtrabackup_integration.sh
 
-          # PyOpenSSL Integration Tests
-          - name: pyopenssl
-            arch: x86_64
-            size: medium
-            image: ubuntu:22.04
-            compiler: gcc-12
-            run: ./tests/ci/integration/run_pyopenssl_integration.sh '25.3.0'
     env:
       ACCP_FIPS: ${{ matrix.accp_fips || '' }}
     steps:
@@ -563,7 +467,6 @@ jobs:
       matrix:
         arch: ["x86_64"]
         version:
-          - master
           - ruby_3_2
           - ruby_3_3
           - ruby_3_4

@@ -57,5 +57,5 @@ class IntegrationTarget(BaseModel):
         script = f"aws() {{ :; }}; export -f aws; [ -f {setup} ] && source {setup}; {run}"
         if env.user:
             script = (f"mkdir -p /home/{env.user}; chown -R {env.user} /home/{env.user} .. 2>/dev/null; "
-                      f"su -p {env.user} -c {shlex.quote(script)}")
+                      f"su -p {env.user} -c {shlex.quote(f'export HOME=/home/{env.user}; {script}')}")
         return script

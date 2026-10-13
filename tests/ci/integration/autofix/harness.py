@@ -99,6 +99,7 @@ class Harness:
         (self.out / "changes.diff").write_text(sandbox.awslc.diff(sandbox.editable))
         (self.out / "description.md").write_text(str(final_message))
         (self.out / "transcript.json").write_text(json.dumps(agent.messages, indent=2, default=str))
+        (self.out / "metrics-reason.json").write_text(json.dumps(final_message.metrics.get_summary(), indent=2, default=str))
         return self.verify(sandbox)
 
     # Replay the fix in changes.diff on this runner's arch and save the result, after the agent or on a second arch.
@@ -119,8 +120,9 @@ class Harness:
             logs = "\n\n".join(log.read_text() for log in sorted((self.out / "logs").glob("*.log")))
             message = f"<diff>\n{self.diff}\n</diff>\n\n<description>\n{self.description}\n</description>"
             reviewer = Agent((_PROMPTS / "review.md").read_text(), tools=[read_ci_logs])
-            verdict = reviewer(message, invocation_state={"logs": logs},
-                               structured_output_model=ReviewVerdict).structured_output
+            result = reviewer(message, invocation_state={"logs": logs}, structured_output_model=ReviewVerdict)
+            (self.out / "metrics-review.json").write_text(json.dumps(result.metrics.get_summary(), indent=2, default=str))
+            verdict = result.structured_output
         (self.out / "review.json").write_text(verdict.model_dump_json(indent=2))
         return verdict
 

@@ -21,7 +21,7 @@ index cd50ed5..acd5a1c 100644
 @@ -1710,6 +1710,11 @@ def omit_if_support_ml_dsa_cert
    def omit_if_support_ml_dsa_key
      omit "OpenSSL supports ML-DSA" if Gem::PQCUtilities.support_ml_dsa_key?
-   end
+   end # ml_dsa_key
 +
 +  def omit_if_support_ml_dsa_key_load
 +    omit "OpenSSL loads ML-DSA keys" if

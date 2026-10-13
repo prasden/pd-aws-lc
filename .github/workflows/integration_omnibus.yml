@@ -29,32 +29,49 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # tpm2-tss Integration Tests
-          - name: tpm2-tss
-            arch: x86_64
-            size: small
-            image: ubuntu:22.04
-            compiler: gcc-12
-            run: ./tests/ci/integration/run_tpm2_tss_integration.sh
-          - name: openssh-master
-            arch: x86_64
-            size: small
-            image: amazonlinux:2023
-            compiler: clang-15
-            run: ./tests/ci/integration/run_openssh_integration.sh master
-          - name: nginx
+          - name: curl
             arch: x86_64
             size: medium
             image: ubuntu:22.04
+            compiler: gcc-11
+            ipv6: true
+            run: ./tests/ci/integration/run_curl_integration.sh
+          - name: curl
+            arch: aarch64
+            size: large
+            image: ubuntu:22.04
+            compiler: gcc-11
+            ipv6: true
+            run: ./tests/ci/integration/run_curl_integration.sh
+          - name: mysql
+            arch: x86_64
+            size: 2xlarge
+            image: ubuntu:22.04
             compiler: gcc-12
+            credentials: true
             user: postgres
-            run: ./tests/ci/integration/run_nginx_integration.sh
-          - name: pyopenssl
-            arch: x86_64
-            size: medium
+            run: ./tests/ci/integration/run_mysql_integration.sh
+          - name: mysql
+            arch: aarch64
+            size: 2xlarge
             image: ubuntu:22.04
             compiler: gcc-12
-            run: ./tests/ci/integration/run_pyopenssl_integration.sh '25.3.0'
+            credentials: true
+            user: postgres
+            run: ./tests/ci/integration/run_mysql_integration.sh
+          - name: s2n-tls
+            arch: x86_64
+            size: small
+            image: ubuntu:20.04
+            compiler: clang-9
+            run: ./tests/ci/integration/run_s2n_integration.sh
+          - name: accp-aarch64
+            arch: aarch64
+            size: 2xlarge
+            image: ubuntu:22.04
+            compiler: gcc-12
+            accp_fips: false
+            run: ./tests/ci/integration/run_accp_integration.sh
     env:
       ACCP_FIPS: ${{ matrix.accp_fips || '' }}
     steps:
@@ -92,7 +109,6 @@ jobs:
           if-no-files-found: ignore
 
   python:
-    if: false
     name: python-${{ matrix.version }}${{ matrix.buildFIPS == 1 && '-fips' || '' }}-${{ matrix.crtUseSystemCrypto == 1 && 'crt-vendored-crypto' || 'crt-system-crypto' }}-${{ matrix.arch }}
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
@@ -102,32 +118,9 @@ jobs:
       fail-fast: false
       matrix:
         arch: ["x86_64"]
-        version:
-          - "3.9"
-          - "3.10"
-          - "3.11"
-          - "3.12"
-          - "3.13"
-          - "3.14"
-          - "3.15"
+        version: ["3.15"]
         buildFIPS: [0, 1]
-        crtUseSystemCrypto: [0, 1]
-        # Python 3.12+ uses prebuilt CRT wheels, so the linkage selector
-        # does not change the build or tests for these versions.
-        exclude:
-          - version: "3.12"
-            crtUseSystemCrypto: 1
-          - version: "3.13"
-            crtUseSystemCrypto: 1
-          - version: "3.14"
-            crtUseSystemCrypto: 1
-          - version: "3.15"
-            crtUseSystemCrypto: 1
-        include:
-          - version: main
-            buildFIPS: 0
-            crtUseSystemCrypto: 0
-            arch: x86_64
+        crtUseSystemCrypto: [0]
     env:
       FIPS: ${{ matrix.buildFIPS }}
       AWS_CRT_BUILD_USE_SYSTEM_LIBCRYPTO: ${{ matrix.crtUseSystemCrypto }}
@@ -150,7 +143,7 @@ jobs:
             source /opt/compiler-env/setup-gcc-12.sh
             ./tests/ci/integration/run_python_integration.sh ${{ matrix.version }}
       - name: Record job settings
-        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule' && hashFiles('integration-failure.txt') != ''
+        if: always() && steps.integration-test.outcome == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && hashFiles('integration-failure.txt') != ''
         env:
           MATRIX: ${{ toJSON(matrix) }}
           JOB_ID: ${{ job.check_run_id }}
@@ -159,14 +152,13 @@ jobs:
             compiler: "gcc-12", ipv6: true, env_vars: (env | {FIPS, AWS_CRT_BUILD_USE_SYSTEM_LIBCRYPTO})} + .' \
             <<< "$MATRIX")" >> integration-failure.txt
       - uses: actions/upload-artifact@v7
-        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule'
+        if: always() && steps.integration-test.outcome == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         with:
           name: integration-failure-python-${{ matrix.version }}-${{ matrix.buildFIPS }}-${{ matrix.crtUseSystemCrypto }}-${{ matrix.arch }}
           path: integration-failure.txt
           if-no-files-found: ignore
 
   ruby:
-    if: false
     name: ruby-${{ matrix.version }}${{ matrix.buildFIPS == 1 && '-fips' || '' }}-${{ matrix.arch }}
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
@@ -176,12 +168,8 @@ jobs:
       fail-fast: false
       matrix:
         arch: ["x86_64"]
-        version:
-          - master
-          - ruby_3_2
-          - ruby_3_3
-          - ruby_3_4
-        buildFIPS: [0, 1]
+        version: [master]
+        buildFIPS: [0]
     env:
       FIPS: ${{ matrix.buildFIPS }}
     steps:
@@ -202,7 +190,7 @@ jobs:
             source /opt/compiler-env/setup-gcc-13.sh
             ./tests/ci/integration/run_ruby_integration.sh ${{ matrix.version }}
       - name: Record job settings
-        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule' && hashFiles('integration-failure.txt') != ''
+        if: always() && steps.integration-test.outcome == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && hashFiles('integration-failure.txt') != ''
         env:
           MATRIX: ${{ toJSON(matrix) }}
           JOB_ID: ${{ job.check_run_id }}
@@ -210,7 +198,7 @@ jobs:
           echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), size: "medium", image: "ubuntu:24.04",
             compiler: "gcc-13", ipv6: true, env_vars: (env | {FIPS})} + .' <<< "$MATRIX")" >> integration-failure.txt
       - uses: actions/upload-artifact@v7
-        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule'
+        if: always() && steps.integration-test.outcome == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         with:
           name: integration-failure-ruby-${{ matrix.version }}-${{ matrix.buildFIPS }}-${{ matrix.arch }}
           path: integration-failure.txt

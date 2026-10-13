@@ -41,7 +41,7 @@ function fail() {
 }
 
 function s2n_tls_build() {
-	${CMAKE_COMMAND} s2n-tls -GNinja "-B${S2N_TLS_BUILD_FOLDER}" "-DCMAKE_PREFIX_PATH=${AWS_LC_INSTALL_FOLDER}" "$@"
+	${CMAKE_COMMAND} s2n-tls -GNinja "-B${S2N_TLS_BUILD_FOLDER}" "-DCMAKE_PREFIX_PATH=${AWS_LC_BUILD_FOLDER}" "$@"
 	ninja -C ${S2N_TLS_BUILD_FOLDER}
 	ls -R ${S2N_TLS_BUILD_FOLDER}
 }

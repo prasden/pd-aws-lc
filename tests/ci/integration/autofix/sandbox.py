@@ -19,24 +19,69 @@ _CONTAINER_AWSLC = Path("/codebuild/output/aws-lc")
 _CONTAINER_SRC = Path("/autofix-src")
 _PROXY_IMAGE = ("public.ecr.aws/docker/library/python:3.13-alpine"
                 "@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a")
-_PROXY_SCRIPT = Path(__file__).parent / "egress_proxy.py"
-_GITHUB = {"github.com", "codeload.github.com", ".githubusercontent.com"}
-_PYPI = {"pypi.org", "files.pythonhosted.org"}
-_APT = {"archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com"}
-_CRATES = {"crates.io", "index.crates.io", "static.crates.io", "static.rust-lang.org"}
-_GRADLE = {"services.gradle.org", "plugins.gradle.org", "plugins-artifacts.gradle.org", "downloads.gradle.org",
-           "repo.maven.apache.org", "repo1.maven.org"}
+# Forward HTTPS CONNECT on port 443 and plain HTTP on port 80 to the hosts in argv, and refuse everything else.
+# Example: with argv ".githubusercontent.com", CONNECT objects.githubusercontent.com:443 passes, github.com gets 403.
+_PROXY_CODE = r'''
+import asyncio, sys
+from urllib.parse import urlsplit
+
+async def pipe(reader, writer):
+    try:
+        while data := await reader.read(65536):
+            writer.write(data)
+            await writer.drain()
+    finally:
+        writer.close()
+
+async def handle(reader, writer):
+    try:
+        head = await reader.readuntil(b"\r\n\r\n")
+        method, target, _ = head.split(b"\r\n", 1)[0].decode().split(" ")
+        url = urlsplit(f"https://{target}" if method == "CONNECT" else target)
+        host, port = (url.hostname or "").lower(), url.port or 80
+        allowed = any(host == entry or entry.startswith(".") and host.endswith(entry) for entry in sys.argv[1:])
+        if not allowed or (port != 443 if method == "CONNECT" else (url.scheme, port) != ("http", 80)):
+            raise PermissionError(f"denied {method} {host}:{port}")
+        upstream_reader, upstream_writer = await asyncio.open_connection(host, port)
+    except Exception as error:
+        print(error, flush=True)
+        writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+        writer.close()
+        return
+    if method == "CONNECT":
+        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+    else:
+        upstream_writer.write(head.replace(target.encode(), url._replace(scheme="", netloc="").geturl().encode() or b"/", 1))
+    await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer), return_exceptions=True)
+
+async def main():
+    server = await asyncio.start_server(handle, port=3128)
+    await server.serve_forever()
+
+asyncio.run(main())
+'''
+_PROXY_HOST = "egress-proxy"
+_PROXY_ENV = {name: f"http://{_PROXY_HOST}:3128" for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
+_PROXY_ENV["JAVA_TOOL_OPTIONS"] = " ".join(f"-D{scheme}.proxyHost={_PROXY_HOST} -D{scheme}.proxyPort=3128"
+                                           for scheme in ("http", "https"))
+_GITHUB = ["github.com", "codeload.github.com", ".githubusercontent.com"]
+_PYPI = ["pypi.org", "files.pythonhosted.org"]
+_APT = ["archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com"]
+_CRATES = ["crates.io", "index.crates.io", "static.crates.io", "static.rust-lang.org"]
+_GRADLE = ["services.gradle.org", "plugins.gradle.org", "plugins-artifacts.gradle.org", "downloads.gradle.org",
+           "repo.maven.apache.org", "repo1.maven.org"]
+# Hosts each integration downloads from during a replay. Every other integration gets no internet.
 _EGRESS = {
-    "accp": _GITHUB | _GRADLE,
-    "bind9": _APT | _PYPI,
+    "accp": _GITHUB + _GRADLE,
+    "bind9": _APT + _PYPI,
     "crt": _GITHUB,
     "grpc": _GITHUB,
-    "httpd": _GITHUB | _APT | _PYPI,
+    "httpd": _GITHUB + _APT + _PYPI,
     "librdkafka": _PYPI,
     "nmap": _APT,
-    "ntp": {"downloads.nwtime.org"},
-    "pyopenssl": _APT | _PYPI | _CRATES,
-    "python": _GITHUB | _PYPI,
+    "ntp": ["downloads.nwtime.org"],
+    "pyopenssl": _APT + _PYPI + _CRATES,
+    "python": _GITHUB + _PYPI,
     "rust_openssl": _CRATES,
     "xtrabackup": _GITHUB,
 }
@@ -102,17 +147,18 @@ class Sandbox:
             container.remove(force=True)
 
     @contextmanager
-    def egress(self) -> Iterator[tuple[str, dict[str, str], Container]]:
-        """Create an internal network whose only way out is a proxy that allows the target's hosts, and remove both on exit.
+    def egress(self) -> Iterator[tuple[str, Container]]:
+        """Create an internal network whose only way out is a proxy that allows the target's hosts.
 
-        Yields the network name, the proxy env vars for a job, and the proxy container, whose logs list denied hosts.
+        Code can ignore proxy env vars, for example with `curl --noproxy '*'` or a raw socket. The internal network
+        gives a job no route out, so the proxy is its only way to reach the internet. Yields the network name and the
+        proxy, whose logs list the denied hosts.
         Example: pyopenssl may reach pypi.org over HTTPS and archive.ubuntu.com over HTTP, and nothing else.
         """
         network = self.docker.networks.create(f"autofix-{uuid.uuid4().hex[:12]}", internal=True)
         proxy = self.docker.containers.run(
             _PROXY_IMAGE,
-            ["python3", "/egress_proxy.py", *sorted(_EGRESS.get(self.target.name, set()))],
-            volumes=[f"{_PROXY_SCRIPT}:/egress_proxy.py:ro"],
+            ["python3", "-c", _PROXY_CODE, *_EGRESS.get(self.target.name, [])],
             user="65534:65534",
             cap_drop=["ALL"],
             security_opt=["no-new-privileges"],
@@ -120,15 +166,8 @@ class Sandbox:
             detach=True,
         )
         try:
-            network.connect(proxy)
-            proxy.reload()
-            ip = proxy.attrs["NetworkSettings"]["Networks"][network.name]["IPAddress"]
-            url = f"http://{ip}:3128"
-            yield network.name, {
-                "http_proxy": url, "https_proxy": url, "HTTP_PROXY": url, "HTTPS_PROXY": url,
-                "JAVA_TOOL_OPTIONS": f"-Dhttp.proxyHost={ip} -Dhttp.proxyPort=3128 "
-                                     f"-Dhttps.proxyHost={ip} -Dhttps.proxyPort=3128",
-            }, proxy
+            network.connect(proxy, aliases=[_PROXY_HOST])
+            yield network.name, proxy
         finally:
             proxy.remove(force=True)
             network.remove()
@@ -147,7 +186,7 @@ class Sandbox:
         copy.apply(diff)
         passed, reports = True, []
         for env in self.jobs:
-            with self.egress() as (network, proxy_env, proxy):
+            with self.egress() as (network, proxy):
                 container = self.docker.containers.run(
                     f"{self.registry}/aws-lc/{env.image}",
                     ["bash", "-c", self.target.script(env)],
@@ -158,7 +197,7 @@ class Sandbox:
                         f"{self.src}:{_CONTAINER_SRC}:ro",
                     ],
                     network=network,
-                    environment=env.env_vars | git_env | proxy_env,
+                    environment=env.env_vars | git_env | _PROXY_ENV,
                     sysctls={"net.ipv6.conf.all.disable_ipv6": "0"} if env.ipv6 else {},
                     detach=True,
                 )

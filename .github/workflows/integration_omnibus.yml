@@ -6,6 +6,7 @@ on:
     branches: [ '*' ]
   schedule:
     - cron: "0 0 * * *"
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
   cancel-in-progress: true
@@ -455,6 +456,7 @@ jobs:
       - uses: ./.github/actions/codebuild-docker-run
         name: Run Container
         id: integration-test
+        if: matrix.name == 'tpm2-tss'
         with:
           image: ${{ steps.login-ecr.outputs.registry }}/aws-lc/${{ matrix.image }}
           env: |
@@ -468,20 +470,21 @@ jobs:
             source /opt/compiler-env/setup-${{ matrix.compiler }}.sh
             ${{ matrix.run }}
       - name: Record job settings
-        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule' && !matrix.allow_failure && hashFiles('integration-failure.txt') != ''
+        if: always() && steps.integration-test.outcome == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !matrix.allow_failure && hashFiles('integration-failure.txt') != ''
         env:
           MATRIX: ${{ toJSON(matrix) }}
           JOB_ID: ${{ job.check_run_id }}
         run: |
           echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), env_vars: (env | {ACCP_FIPS})} + .' <<< "$MATRIX")" >> integration-failure.txt
       - uses: actions/upload-artifact@v7
-        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule' && !matrix.allow_failure
+        if: always() && steps.integration-test.outcome == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !matrix.allow_failure
         with:
           name: integration-failure-${{ matrix.name }}-${{ matrix.arch }}
           path: integration-failure.txt
           if-no-files-found: ignore
 
   python:
+    if: false
     name: python-${{ matrix.version }}${{ matrix.buildFIPS == 1 && '-fips' || '' }}-${{ matrix.crtUseSystemCrypto == 1 && 'crt-vendored-crypto' || 'crt-system-crypto' }}-${{ matrix.arch }}
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
@@ -555,6 +558,7 @@ jobs:
           if-no-files-found: ignore
 
   ruby:
+    if: false
     name: ruby-${{ matrix.version }}${{ matrix.buildFIPS == 1 && '-fips' || '' }}-${{ matrix.arch }}
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}

@@ -26,7 +26,8 @@ jobs:
   recognize:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.conclusion == 'failure')
+      (contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event.workflow_run.event) &&
+       github.event.workflow_run.conclusion == 'failure')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -229,8 +230,8 @@ jobs:
         with:
           app-id: ${{ vars.AUTOFIX_APP_ID }}
           private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
-          owner: crypto-alg
-          repositories: aws-lc
+          owner: prasden
+          repositories: pd-aws-lc
           permission-contents: write
       - uses: actions/create-github-app-token@v2
         id: upstream-token
@@ -240,7 +241,7 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-pull-requests: write
-      - name: Push the fix to crypto-alg and open a draft PR
+      - name: Push the fix to the fork and open a draft PR
         env:
           FORK_TOKEN: ${{ steps.fork-token.outputs.token }}
           UPSTREAM_TOKEN: ${{ steps.upstream-token.outputs.token }}
@@ -249,7 +250,7 @@ jobs:
         run: |
           GH_TOKEN="$FORK_TOKEN" gh auth setup-git
           GH_TOKEN="$FORK_TOKEN" git -C aws-lc-fix -c core.hooksPath=/dev/null push -q \
-            https://github.com/crypto-alg/aws-lc.git "HEAD:refs/heads/$BRANCH"
-          GH_TOKEN="$UPSTREAM_TOKEN" gh pr create --draft --repo "$GITHUB_REPOSITORY" --head "crypto-alg:$BRANCH" \
+            https://github.com/prasden/pd-aws-lc.git "HEAD:refs/heads/$BRANCH"
+          GH_TOKEN="$UPSTREAM_TOKEN" gh pr create --draft --repo "$GITHUB_REPOSITORY" --head "prasden:$BRANCH" \
             --title "$TITLE" --body-file autofix-work/out/pr.md
       - *summary

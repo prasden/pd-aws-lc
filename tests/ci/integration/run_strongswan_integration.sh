@@ -22,7 +22,7 @@ AWS_LC_BUILD_FOLDER="${SCRATCH_FOLDER}/aws-lc-build"
 AWS_LC_INSTALL_FOLDER="${SCRATCH_FOLDER}/aws-lc-install"
 
 function strongswan_build() {
-  export CFLAGS="-I${AWS_LC_INSTALL_DIR}/include"
+  export CFLAGS="-I${AWS_LC_INSTALL_FOLDER}/include"
   export LDFLAGS="-L${AWS_LC_INSTALL_FOLDER}/lib"
   autoreconf -ivf
   # Mirror the configuration flags set by strongSwan's CI by taking all of the

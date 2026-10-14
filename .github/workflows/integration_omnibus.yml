@@ -121,7 +121,7 @@ jobs:
           MATRIX: ${{ toJSON(matrix) }}
           JOB_ID: ${{ job.check_run_id }}
         run: |
-          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), env_vars: (env | {ACCP_FIPS})} + .' <<< "$MATRIX")" >> integration-failure.txt
+          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber), env_vars: (env | {ACCP_FIPS})} + .' <<< "$MATRIX")" >> integration-failure.txt
       - uses: actions/upload-artifact@v7
         if: always() && steps.integration-test.outcome == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !matrix.allow_failure
         with:
@@ -193,7 +193,7 @@ jobs:
           MATRIX: ${{ toJSON(matrix) }}
           JOB_ID: ${{ job.check_run_id }}
         run: |
-          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), size: "medium", image: "ubuntu:22.04",
+          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber), size: "medium", image: "ubuntu:22.04",
             compiler: "gcc-12", ipv6: true, env_vars: (env | {FIPS, AWS_CRT_BUILD_USE_SYSTEM_LIBCRYPTO})} + .' \
             <<< "$MATRIX")" >> integration-failure.txt
       - uses: actions/upload-artifact@v7
@@ -240,7 +240,7 @@ jobs:
           MATRIX: ${{ toJSON(matrix) }}
           JOB_ID: ${{ job.check_run_id }}
         run: |
-          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), size: "medium", image: "ubuntu:24.04",
+          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber), size: "medium", image: "ubuntu:24.04",
             compiler: "gcc-13", ipv6: true, env_vars: (env | {FIPS})} + .' <<< "$MATRIX")" >> integration-failure.txt
       - uses: actions/upload-artifact@v7
         if: always() && steps.integration-test.outcome == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')

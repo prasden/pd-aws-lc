@@ -42,7 +42,7 @@ pushd "${SCRATCH_FOLDER}"
 # Test helper functions.
 
 function install_aws_lc() {
-  AWS_LC_LIB_FOLDER=$(readlink -f "${AWS_LC_INSTALL_DIR}"/lib*)
+  AWS_LC_LIB_FOLDER=$(readlink -f "${AWS_LC_INSTALL_FOLDER}"/lib*)
   # This installs AWS-LC as the "libcrypto" for the system
   echo "${AWS_LC_LIB_FOLDER}" > /etc/ld.so.conf.d/aws-lc.conf
   rm -f /etc/ld.so.cache

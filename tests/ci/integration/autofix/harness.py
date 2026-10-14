@@ -32,7 +32,7 @@ class ReviewVerdict(BaseModel):
 
 
 # Build the job matrix from integration-failure.txt reports: one reason job per target on x86_64 when it failed there,
-# and one verify job for its other failed arch. Example: ruby failing on both arches reasons on x86_64, verifies aarch64.
+# and one verify job for its other failed arch. For example, ruby failing on both arches reasons on x86_64, verifies aarch64.
 def recognize(reports: list[str], awslc: Repo) -> dict[str, list[dict]]:
     matrix = {"reason": [], "verify": []}
     for target in _parse_reports(reports, awslc):
@@ -140,7 +140,6 @@ class Harness:
         return {"branch": branch, "title": f"[autofix] {title}"}
 
     # Match a GitHub permalink to a commit, a file at the tested commit, or a failed CI job of the target's repos.
-    # Example: https://github.com/aws/aws-lc/runs/115492504715 or <tpm2-tss URL>/commit/<40-hex SHA>.
     @property
     def _permalink(self) -> re.Pattern:
         awslc = self.target.awslc

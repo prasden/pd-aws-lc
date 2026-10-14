@@ -33,7 +33,7 @@ function libevent_install() {
   git clone https://github.com/libevent/libevent.git ${LIBEVENT_SRC_FOLDER} --depth 1
   record_repo_commit "${LIBEVENT_SRC_FOLDER}"
   pushd ${LIBEVENT_SRC_FOLDER}
-  cmake -DOPENSSL_ROOT_DIR="${AWS_LC_INSTALL_DIR}" -DCMAKE_INSTALL_PREFIX="${LIBEVENT_INSTALL_FOLDER}"
+  cmake -DOPENSSL_ROOT_DIR="${AWS_LC_INSTALL_FOLDER}" -DCMAKE_INSTALL_PREFIX="${LIBEVENT_INSTALL_FOLDER}"
   make -j "$NUM_CPU_THREADS" install
   popd
 }

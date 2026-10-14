@@ -43,7 +43,7 @@ record_repo_commit "${S2N_TLS_SRC_FOLDER}"
 
 echo "build s2n-tls with aws-lc"
 cd "$S2N_TLS_SRC_FOLDER"
-cmake . "-B$S2N_TLS_BUILD_FOLDER" -GNinjaa \
+cmake . "-B$S2N_TLS_BUILD_FOLDER" -GNinja \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_PREFIX_PATH="$AWS_LC_INSTALL_FOLDER"
 # Suppress stdout for build

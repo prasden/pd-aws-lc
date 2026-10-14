@@ -32,7 +32,7 @@ function ibmtpm_build() {
   export CFLAGS="-I${AWS_LC_INSTALL_FOLDER}/include $CFLAGS"
   export LDFLAGS="-L${AWS_LC_INSTALL_FOLDER}/lib $LDFLAGS"
 
-  pushd source
+  pushd src
   make -j
   
   export LD_LIBRARY_PATH="${AWS_LC_INSTALL_FOLDER}/lib"

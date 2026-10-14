@@ -37,7 +37,7 @@ function openldap_build() {
     autoconf
     # Modify CFLAGS and LDFLAGS so compiler and linker can find AWS-LC's artifacts
     export STRICT_C_COMPILER="gcc"
-    export CPPFLAGS="-I$AWS_LC_INSTALL_DIR/include"
+    export CPPFLAGS="-I$AWS_LC_INSTALL_FOLDER/include"
     export LDFLAGS="$AWS_LC_INSTALL_FOLDER/lib/libcrypto.a $AWS_LC_INSTALL_FOLDER/lib/libssl.a"
     export LDFLAGS="$LDFLAGS -L$AWS_LC_INSTALL_FOLDER/lib"
     ./configure \

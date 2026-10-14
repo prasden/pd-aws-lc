@@ -44,14 +44,11 @@ class Git:
         return subprocess.run(["git", *_LOCKED_DOWN_GIT, "-C", str(self.path), *args], env=self.env, input=input,
                               capture_output=True, text=True, check=True).stdout
 
-    # Turn git config into env vars, which reach every git call in a process tree, including under su -p.
-    # Example: {"safe.directory": "*"} gives GIT_CONFIG_COUNT=1, GIT_CONFIG_KEY_0=safe.directory, GIT_CONFIG_VALUE_0=*.
-    @staticmethod
-    def config_env(config: dict[str, str]) -> dict[str, str]:
-        env = {"GIT_CONFIG_COUNT": str(len(config))}
-        for index, (key, value) in enumerate(config.items()):
-            env |= {f"GIT_CONFIG_KEY_{index}": key, f"GIT_CONFIG_VALUE_{index}": value}
-        return env
+    # Write git config to a file, which a container reads as /etc/gitconfig in every git process, upload-pack included.
+    # Example: {"safe.directory": "*"} writes "[safe]\n\tdirectory = *".
+    def write_config(self, path: Path, config: dict[str, str]) -> None:
+        for key, value in config.items():
+            self.run("config", "--file", str(path), key, value)
 
     @staticmethod
     def changed_paths(diff: str) -> list[Path]:

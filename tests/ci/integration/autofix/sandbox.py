@@ -15,10 +15,6 @@ from .target import IntegrationTarget
 _RUNNER_TIMEOUT = 2 * 3600
 _CONTAINER_AWSLC = Path("/codebuild/output/aws-lc")
 _CONTAINER_SRC = Path("/autofix-src")
-# Integrations whose runner downloads more than the recorded repos, such as apt, pip, cargo, gradle, or submodules.
-# Example: pyopenssl runs apt-get, pip install, and cargo install, so its replay gets the bridge network.
-_NEEDS_NETWORK = {"accp", "bind9", "crt", "grpc", "httpd", "librdkafka", "nmap", "ntp", "pyopenssl", "python",
-                  "rust_openssl", "xtrabackup"}
 
 
 class VerifyResult(BaseModel):
@@ -48,6 +44,9 @@ class Sandbox:
         self.src = self.root / "src"
         for repo in target.repos:
             Git.clone(repo, self.src / repo.name)
+        self.gitconfig = self.root / "gitconfig"
+        self.awslc.write_config(self.gitconfig, {"safe.directory": "*"} | {
+            f"url.file://{_CONTAINER_SRC / repo.name}.insteadOf": repo.url for repo in target.repos})
 
         patch_dirs = target.patch_dirs(self.awslc.path)
         for patch_dir in patch_dirs:
@@ -84,12 +83,10 @@ class Sandbox:
     def replay(self, diff: str) -> VerifyResult:
         """Replay a diff on a fresh copy of aws-lc in every failed CI job of this arch, the way CI ran them.
 
-        The patches and .git are read-only, each job's git clones copy the local downstream repos, and only the
-        integrations that download dependencies get a network. Each diff runs once, so the check after the agent
-        stops reuses the agent's last replay of the same changes.
+        The patches and .git are read-only, and each job's git clones copy the local downstream repos. The job has the
+        same network as CI, because runners download dependencies such as apt packages, pip packages, and submodules.
+        Each diff runs once, so the check after the agent stops reuses the agent's last replay of the same changes.
         """
-        git_env = Git.config_env({"safe.directory": "*"} | {
-            f"url.file://{_CONTAINER_SRC / repo.name}.insteadOf": repo.url for repo in self.target.repos})
         copy = self.awslc.copy(self.root)
         copy.apply(diff)
         passed, reports = True, []
@@ -102,9 +99,10 @@ class Sandbox:
                     f"{copy.path}:{_CONTAINER_AWSLC}:rw",
                     *(f"{copy.path / path}:{_CONTAINER_AWSLC / path}:ro" for path in [".git", *self.editable]),
                     f"{self.src}:{_CONTAINER_SRC}:ro",
+                    f"{self.gitconfig}:/etc/gitconfig:ro",
                 ],
-                network_mode="bridge" if self.target.name in _NEEDS_NETWORK else "none",
-                environment=env.env_vars | git_env,
+                network_mode="bridge",
+                environment=env.env_vars,
                 sysctls={"net.ipv6.conf.all.disable_ipv6": "0"} if env.ipv6 else {},
                 detach=True,
             )

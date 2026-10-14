@@ -39,7 +39,7 @@ function python_build() {
     local branch=${1}
     pushd ${branch}
     ./configure \
-          --with-openssl=${AWS_LC_INSTALL_DIR} \
+          --with-openssl=${AWS_LC_INSTALL_FOLDER} \
           --with-builtin-hashlib-hashes=blake2 \
           --with-ssl-default-suites=openssl
     make -j ${NUM_CPU_THREADS}

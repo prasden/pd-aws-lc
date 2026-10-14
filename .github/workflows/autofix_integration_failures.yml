@@ -98,10 +98,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$WORK_DIR/out/logs"
-          for job_id in $(jq -r '.environments[].job_id | select(. != 0)' <<< "$TARGET"); do
+          for job_id in $(jq -r '.environments[].job_id' <<< "$TARGET"); do
             gh api --allow-escape-sequences "repos/$SOURCE_REPO/actions/jobs/$job_id/logs" |
-              sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' | tr -cd '\11\12\40-\176' > "$WORK_DIR/out/logs/$job_id.log" ||
-              echo "::warning::Could not download the log of CI job $job_id"
+              sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' | tr -cd '\11\12\40-\176' > "$WORK_DIR/out/logs/$job_id.log"
           done
       # Log in with the runner's own role before assuming the Bedrock role, which cannot pull images.
       - &ecr

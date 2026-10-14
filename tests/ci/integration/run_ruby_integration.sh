@@ -37,7 +37,7 @@ function ruby_build() {
     mkdir -p install
     ./configure --disable-install-doc \
                  --prefix="$PWD/install" \
-                 --with-openssl-dir=${AWS_LC_INSTALL_DIR}
+                 --with-openssl-dir=${AWS_LC_INSTALL_FOLDER}
     make V=1 -j ${NUM_CPU_THREADS}
     make install
     # Check that AWS-LC was used. Drain the output to avoid SIGPIPE under pipefail.

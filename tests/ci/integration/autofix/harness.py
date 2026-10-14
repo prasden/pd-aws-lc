@@ -85,7 +85,7 @@ class Harness:
             root=str(sandbox.root),
             awslc=f"{self.target.awslc.web} at `{self.target.awslc.sha}`",
             jobs=", ".join(f"`out/logs/{env.job_id}.log` ({self.target.awslc.web}/runs/{env.job_id})"
-                           for env in self.target.environments if env.job_id),
+                           for env in self.target.environments),
             repos=", ".join(f"`src/{repo.name}` ({repo.web} at `{repo.sha}`)" for repo in self.target.repos),
             editable=", ".join(f"`aws-lc/{path}`" for path in sandbox.editable),
         )
@@ -145,7 +145,7 @@ class Harness:
         awslc = self.target.awslc
         files = (rf"{re.escape(repo.web)}/(?:commit/[0-9a-f]{{40}}|blob/{repo.sha}/[\w./-]+(?:#L\d+(?:-L\d+)?)?)"
                  for repo in [awslc, *self.target.repos])
-        jobs = "|".join(str(env.job_id) for env in self.target.environments if env.job_id)
+        jobs = "|".join(str(env.job_id) for env in self.target.environments)
         return re.compile("|".join([*files, rf"{re.escape(awslc.web)}/runs/(?:{jobs})"]))
 
     # Check for secrets leakage, hidden text, links that are not permalinks, or edits outside the integration/ directory.

@@ -17,7 +17,7 @@ class Environment(BaseModel, frozen=True):
     compiler: str = Field(pattern=_SHELL_SAFE)
     arch: Arch
     size: Size
-    job_id: int = 0
+    job_id: int = Field(gt=0)
     user: str = Field("", pattern=_SHELL_SAFE)
     ipv6: bool = False
     env_vars: dict[str, str] = {}
@@ -63,6 +63,7 @@ class IntegrationTarget(BaseModel):
         run = f"./{self.runner} {shlex.quote(self.version)}"
         script = f"aws() {{ :; }}; export -f aws; [ -f {setup} ] && source {setup}; {run}"
         if env.user:
-            script = (f"mkdir -p /home/{env.user}; chown -R {env.user} /home/{env.user} .. 2>/dev/null; "
-                      f"su -p {env.user} -c {shlex.quote(f'export HOME=/home/{env.user}; {script}')}")
+            inner = f'export HOME=/home/{env.user} PATH="$CONTAINER_PATH"; {script}'
+            script = (f"export CONTAINER_PATH=\"$PATH\"; mkdir -p /home/{env.user}; "
+                      f"chown -R {env.user} /home/{env.user} .. 2>/dev/null; su -p {env.user} -c {shlex.quote(inner)}")
         return script

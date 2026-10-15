@@ -29,7 +29,7 @@ rm -rf "${SCRATCH_FOLDER:?}"/*
 cd ${SCRATCH_FOLDER}
 
 function xmlsec_build() {
-  export OPENSSL_CFLAGS="-I${AWS_LC_INSTALL_DIR}/include"
+  export OPENSSL_CFLAGS="-I${AWS_LC_INSTALL_FOLDER}/include"
   export OPENSSL_LIBS="-L${AWS_LC_INSTALL_FOLDER}/lib -lssl -lcrypto"
   export LD_FLAGS="-Wl,-rpath=${AWS_LC_INSTALL_FOLDER}/lib"
 

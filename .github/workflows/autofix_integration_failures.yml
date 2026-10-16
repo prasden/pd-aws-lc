@@ -13,6 +13,9 @@ on:
         description: Repository that ran the omnibus, e.g. aws/aws-lc
         required: true
         default: aws/aws-lc
+      targets:
+        description: Test scaffolding. Space-separated target names to keep, or empty for all.
+        default: ""
 
 permissions:
   contents: read
@@ -64,10 +67,13 @@ jobs:
         working-directory: tests/ci/integration
         env:
           AWSLC_SHA: ${{ steps.omnibus.outputs.sha }}
+          TARGETS: ${{ inputs.targets }}
         run: |
           matrix=$(python -m autofix recognize --reports "$GITHUB_WORKSPACE/autofix-reports" \
             --awslc-repo "https://github.com/$SOURCE_REPO.git" --awslc-sha "$AWSLC_SHA")
-          jq -r '"reason=\(.reason | tojson)", "verify=\(.verify | tojson)"' <<< "$matrix" >> "$GITHUB_OUTPUT"
+          jq -r '(env.TARGETS | split(" ") | map(select(. != ""))) as $keep
+            | map_values(map(select(($keep | length) == 0 or (.name | IN($keep[])))))
+            | "reason=\(.reason | tojson)", "verify=\(.verify | tojson)"' <<< "$matrix" >> "$GITHUB_OUTPUT"
 
   reason:
     name: reason (${{ matrix.name }})

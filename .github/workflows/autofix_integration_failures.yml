@@ -105,8 +105,14 @@ jobs:
         run: |
           mkdir -p "$WORK_DIR/out/logs"
           for job_id in $(jq -r '.environments[].job_id' <<< "$TARGET"); do
-            gh api --allow-escape-sequences "repos/$SOURCE_REPO/actions/jobs/$job_id/logs" |
-              sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' | tr -cd '\11\12\40-\176' > "$WORK_DIR/out/logs/$job_id.log"
+            log="$WORK_DIR/out/logs/$job_id.log"
+            attempt=1
+            until gh api --allow-escape-sequences "repos/$SOURCE_REPO/actions/jobs/$job_id/logs" > "$log.raw"; do
+              (( attempt++ < 3 )) || exit 1
+              sleep 30
+            done
+            sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' "$log.raw" | tr -cd '\11\12\40-\176' > "$log"
+            rm "$log.raw"
           done
       # Log in with the runner's own role before assuming the Bedrock role, which cannot pull images.
       - &ecr
@@ -272,7 +278,7 @@ jobs:
         run: |
           GH_TOKEN="$FORK_TOKEN" gh auth setup-git
           GH_TOKEN="$FORK_TOKEN" git -C aws-lc-fix -c core.hooksPath=/dev/null push -q \
-            https://github.com/prasden/pd-aws-lc.git "HEAD:refs/heads/$BRANCH"
+            https://github.com/prasden/pd-aws-lc.git "+HEAD:refs/heads/$BRANCH"
           GH_TOKEN="$UPSTREAM_TOKEN" gh pr create --draft --repo "$GITHUB_REPOSITORY" --head "prasden:$BRANCH" \
             --title "$TITLE" --body-file autofix-work/out/pr.md
       - *summary

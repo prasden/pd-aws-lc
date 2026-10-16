@@ -104,6 +104,7 @@ class Sandbox:
                 network_mode="bridge",
                 environment=env.env_vars,
                 sysctls={"net.ipv6.conf.all.disable_ipv6": "0"} if env.ipv6 else {},
+                cap_add=["NET_ADMIN"] if env.ipv6 else [],
                 init=True,
                 detach=True,
             )

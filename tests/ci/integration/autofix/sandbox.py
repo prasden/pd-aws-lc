@@ -88,6 +88,7 @@ class Sandbox:
         Each diff runs once, so the check after the agent stops reuses the agent's last replay of the same changes.
         """
         copy = self.awslc.copy(self.root)
+        copy.run("remote", "set-url", "origin", self.target.awslc.url)
         copy.apply(diff)
         passed, reports = True, []
         for env in self.jobs:

@@ -83,7 +83,7 @@ class Sandbox:
     def replay(self, diff: str) -> VerifyResult:
         """Replay a diff on a fresh copy of aws-lc in every failed CI job of this arch, the way CI ran them.
 
-        The patches and .git are read-only, and each job's git clones copy the local downstream repos. The job has the
+        The patches are read-only, and each job's git clones copy the local downstream repos. The job has the
         same network as CI, because runners download dependencies such as apt packages, pip packages, and submodules.
         Each diff runs once, so the check after the agent stops reuses the agent's last replay of the same changes.
         """
@@ -97,7 +97,7 @@ class Sandbox:
                 working_dir=str(_CONTAINER_AWSLC),
                 volumes=[
                     f"{copy.path}:{_CONTAINER_AWSLC}:rw",
-                    *(f"{copy.path / path}:{_CONTAINER_AWSLC / path}:ro" for path in [".git", *self.editable]),
+                    *(f"{copy.path / path}:{_CONTAINER_AWSLC / path}:ro" for path in self.editable),
                     f"{self.src}:{_CONTAINER_SRC}:ro",
                     f"{self.gitconfig}:/etc/gitconfig:ro",
                 ],

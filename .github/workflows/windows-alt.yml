@@ -325,6 +325,18 @@ jobs:
             cc
             go
             nasm
+      - name: Pin mingw-w64 runtime
+        if: matrix.sys == 'mingw64'
+        shell: 'msys2 {0}'
+        run: |
+          # mingw-w64 r495 fails to link std::thread programs with "ld returned 8 exit status".
+          # Remove this pin once MSYS2 ships a fixed mingw64 runtime.
+          base=https://repo.msys2.org/mingw/mingw64
+          pacman -U --noconfirm \
+            ${base}/mingw-w64-x86_64-crt-14.0.0.r426.g4564ee4b5-1-any.pkg.tar.zst \
+            ${base}/mingw-w64-x86_64-headers-14.0.0.r426.g4564ee4b5-1-any.pkg.tar.zst \
+            ${base}/mingw-w64-x86_64-libwinpthread-14.0.0.r426.g4564ee4b5-2-any.pkg.tar.zst \
+            ${base}/mingw-w64-x86_64-winpthreads-14.0.0.r426.g4564ee4b5-2-any.pkg.tar.zst
       - name: Update Environment
         shell: bash
         run: |

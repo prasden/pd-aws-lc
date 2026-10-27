@@ -62,7 +62,7 @@ class Git:
         git.run("fetch", "-q", "--no-tags", "--depth", "500", repo.url, repo.sha)
         git.run("checkout", "-q", "FETCH_HEAD")
         refs = git.run("ls-remote", "--heads", "--tags", "--refs", repo.url).splitlines()
-        git.run("update-ref", "--stdin", input="".join(f"update {ref.partition('\t')[2]} {repo.sha}\n" for ref in refs))
+        git.run("update-ref", "--stdin", input="".join(f"update {ref.split()[1]} {repo.sha}\n" for ref in refs))
         return git
 
     # Copy HEAD into a new folder under parent, so a CI replay cannot dirty this checkout.

@@ -98,14 +98,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      # Set up Python with uv, because actions/setup-python has no build for the Amazon Linux CodeBuild image.
-      - &setup-python
-        uses: astral-sh/setup-uv@v10.3.0
-        with:
-          python-version: "3.13"
-          activate-environment: true
       - &install
-        run: uv pip install -r tests/ci/integration/autofix/requirements.txt
+        run: |
+          python3 --version
+          python3 -m pip install -r tests/ci/integration/autofix/requirements.txt
       - uses: actions/download-artifact@v8
         with:
           name: autofix-logs
@@ -142,7 +138,7 @@ jobs:
         working-directory: tests/ci/integration
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: python -m autofix reason
+        run: python3 -m autofix reason
       - &upload
         uses: actions/upload-artifact@v7
         if: always()
@@ -165,7 +161,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - *setup-python
       - *install
       - &results
         uses: actions/download-artifact@v8
@@ -176,7 +171,7 @@ jobs:
       - *bedrock
       - name: Review the fix
         working-directory: tests/ci/integration
-        run: python -m autofix review
+        run: python3 -m autofix review
       - *upload
 
   resolve:
@@ -202,7 +197,6 @@ jobs:
           path: aws-lc-fix
           fetch-depth: 0
           persist-credentials: false
-      - *setup-python
       - *install
       - *results
       - name: Commit the fix
@@ -210,7 +204,7 @@ jobs:
         working-directory: tests/ci/integration
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: python -m autofix resolve "$GITHUB_WORKSPACE/aws-lc-fix" >> "$GITHUB_OUTPUT"
+        run: python3 -m autofix resolve "$GITHUB_WORKSPACE/aws-lc-fix" >> "$GITHUB_OUTPUT"
       - *bedrock-region
       - uses: ./.github/actions/configure-aws-credentials
         with:

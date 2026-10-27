@@ -7,7 +7,7 @@ from typing import Self
 
 from pydantic.dataclasses import dataclass
 
-_COMMIT_SHA = re.compile(r"[0-9a-f]{40}") # Allow only full SHAs and plain folder names from integration-failure.txt, 
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}") # Allow only full SHAs and plain folder names from integration-failure.txt,
                                           # because downstream tests can rewrite it.
 _REPO_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 _LOCKED_DOWN_GIT = ("-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never",
@@ -41,7 +41,6 @@ class Git:
                               capture_output=True, text=True, check=True).stdout
 
     # Turn git config into env vars, which reach every git call in a process tree, including under su -p.
-    # Example: {"safe.directory": "*"} gives GIT_CONFIG_COUNT=1, GIT_CONFIG_KEY_0=safe.directory, GIT_CONFIG_VALUE_0=*.
     @staticmethod
     def config_env(config: dict[str, str]) -> dict[str, str]:
         env = {"GIT_CONFIG_COUNT": str(len(config))}

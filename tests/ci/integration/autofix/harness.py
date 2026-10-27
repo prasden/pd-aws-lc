@@ -19,13 +19,9 @@ from .target import Environment, IntegrationTarget
 
 _AI_CONFIG = json.loads((Path(__file__).parents[4] / ".github/workflows/ai-config.json").read_text())
 _MODEL = f"bedrock/{_AI_CONFIG['opus']}"
-_AGENT_DEFAULTS = {"model": _MODEL, "builtin_tools": [], "builtin_plugins": [], "context_manager": "auto",
-                   "session": False, "memory": False, "skills": False, "background_tasks": False,
-                   "tool_executor": SequentialToolExecutor()}
 _LIMITS = Limits(turns=150, total_tokens=6_000_000)
 _TIMEOUT = 45 * 60
 _PROMPTS = Path(__file__).parent / "prompts"
-_REVIEW_LOG_TAIL = 3000
 _LICENSE = ("By submitting this pull request, I confirm that my contribution is made under the terms of the "
             "Apache 2.0 license and the ISC license.")
 _SECRET_PATTERNS = (
@@ -44,8 +40,7 @@ class ReviewVerdict(BaseModel):
     findings: list[str] = []
 
 
-# Build the job matrix from integration-failure.txt reports: one reason job per target, on x86_64 when it failed there.
-# Example: ruby failing on both arches reasons on x86_64.
+# Build the job matrix from integration-failure.txt reports: one reason job per target.
 def recognize(reports: list[str], awslc: Repo) -> list[dict]:
     return [{"name": target.dir_name, "arch": min(target.arches, key=lambda arch: arch != "x86_64"),
              "target": target.model_dump(mode="json")} for target in _parse_reports(reports, awslc)]
@@ -87,7 +82,18 @@ class Harness:
     @staticmethod
     def _run_agent(instructions: str, message: str, call: dict[str, Any], **options: Any) -> AgentResult:
         """Run a fresh agent once within its turn and token limits, cancelling it when the timeout passes."""
-        agent = create_harness(**_AGENT_DEFAULTS | {"instructions": instructions} | options)
+        agent = create_harness(**{
+            "model": _MODEL,
+            "instructions": instructions,
+            "builtin_tools": [],
+            "builtin_plugins": [],
+            "context_manager": "auto",
+            "session": False,
+            "memory": False,
+            "skills": False,
+            "background_tasks": False,
+            "tool_executor": SequentialToolExecutor(),
+        } | options)
         deadline = threading.Event()
         timer = threading.Timer(_TIMEOUT, deadline.set)
         timer.start()
@@ -124,7 +130,7 @@ class Harness:
         elif not self._follows_rules():
             verdict = ReviewVerdict(safe=False, findings=["The diff breaks a fixed rule: scope, secrets, or hidden text."])
         else:
-            logs = "\n\n".join(log.read_text()[-_REVIEW_LOG_TAIL:] for log in sorted((self.out / "logs").glob("*.log")))
+            logs = "\n\n".join(log.read_text() for log in sorted((self.out / "logs").glob("*.log")))
             message = (f"<logs>\n{logs}\n</logs>\n\n<diff>\n{self.diff}\n</diff>\n\n"
                        f"<description>\n{self.description}\n</description>")
             verdict = self._run_agent((_PROMPTS / "review.md").read_text(), message,
@@ -146,8 +152,8 @@ class Harness:
         (self.out / "pr.md").write_text(f"{self.description.strip()}\n\n{bot}\n\n{_LICENSE}\n")
         return {"branch": branch, "title": f"[autofix] {title}"}
 
-    # Check for secrets leakage, hidden text, or edits outside the integration/ directory. 
-    # A hardening for defense in depth. 
+    # Check for secrets leakage, hidden text, or edits outside the integration/ directory.
+    # A hardening for defense in depth.
     def _follows_rules(self) -> bool:
         diff = self.diff
         if not diff:

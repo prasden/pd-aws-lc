@@ -23,10 +23,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.conclusion == 'failure')
-    runs-on:
-      - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
-        image:linux-5.0
-        instance-size:small
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
@@ -36,13 +33,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - &setup-python
-        uses: astral-sh/setup-uv@v10.3.0
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-          activate-environment: true
-      - &install
-        run: uv pip install -r tests/ci/integration/autofix/requirements.txt
+      - run: pip install -r tests/ci/integration/autofix/requirements.txt
       - uses: actions/download-artifact@v8
         with:
           pattern: integration-failure-*
@@ -104,8 +98,14 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - *setup-python
-      - *install
+      # Set up Python with uv, because actions/setup-python has no build for the Amazon Linux CodeBuild image.
+      - &setup-python
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.13"
+          activate-environment: true
+      - &install
+        run: uv pip install -r tests/ci/integration/autofix/requirements.txt
       - uses: actions/download-artifact@v8
         with:
           name: autofix-logs

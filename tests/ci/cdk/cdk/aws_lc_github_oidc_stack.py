@@ -7,6 +7,7 @@ from aws_cdk import (
     aws_ecr as ecr,
     aws_iam as iam,
     aws_s3 as s3,
+    aws_secretsmanager as sm,
     Stack,
     Environment,
 )
@@ -124,6 +125,10 @@ class AwsLcGitHubOidcStack(Stack):
             self, "AwsLcGitHubActionAutofixUploadRole", self.autofix_oidc_role,
             self.autofix_bucket)
         self.autofix_upload_role.grant_assume_role(self.autofix_oidc_role)
+
+        self.get_autofix_pat_role = create_get_autofix_pat_role(
+            self, "AwsLcGitHubActionsGetAutofixPatRole", self.autofix_oidc_role)
+        self.get_autofix_pat_role.grant_assume_role(self.autofix_oidc_role)
 
 
 def create_device_farm_role(scope: Construct, id: str,
@@ -373,3 +378,9 @@ def create_autofix_upload_role(scope: Construct, id: str,
                             ]
                         ),
                     })
+
+
+def create_get_autofix_pat_role(scope: Construct, id: str, principal: iam.IPrincipal) -> iam.Role:
+    role = iam.Role(scope, id, role_name=id, assumed_by=iam.SessionTagsPrincipal(principal))
+    sm.Secret.from_secret_name_v2(scope, "autofix-push-token", "aws-lc/ci/autofix-push-token").grant_read(role)
+    return role

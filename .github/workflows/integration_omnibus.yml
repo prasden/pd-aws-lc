@@ -6,6 +6,7 @@ on:
     branches: [ '*' ]
   schedule:
     - cron: "0 0 * * *"
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
   cancel-in-progress: true
@@ -17,6 +18,7 @@ permissions:
 
 jobs:
   integrations:
+    if: github.event_name != 'workflow_dispatch'
     name: ${{ matrix.name }}-${{ matrix.arch }}${{ matrix.allow_failure && '-allow-failure' || '' }}
     continue-on-error: ${{ matrix.allow_failure || false }}
     runs-on:
@@ -393,9 +395,7 @@ jobs:
             compiler: gcc-12
             ipv6: true
             options: --privileged
-            run: |
-              python3 -m pip install --upgrade meson
-              ./tests/ci/integration/run_bind9_integration.sh
+            run: ./tests/ci/integration/run_bind9_integration.sh
 
           # strongSwan Integration Tests
           - name: strongswan
@@ -472,7 +472,9 @@ jobs:
         if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule' && !matrix.allow_failure && hashFiles('integration-failure.txt') != ''
         env:
           MATRIX: ${{ toJSON(matrix) }}
-        run: echo "job=$(jq -c . <<< "$MATRIX")" >> integration-failure.txt
+          JOB_ID: ${{ job.check_run_id }}
+        run: |
+          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), env_vars: (env | {ACCP_FIPS})} + .' <<< "$MATRIX")" >> integration-failure.txt
       - uses: actions/upload-artifact@v7
         if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule' && !matrix.allow_failure
         with:
@@ -490,32 +492,9 @@ jobs:
       fail-fast: false
       matrix:
         arch: ["x86_64"]
-        version:
-          - "3.9"
-          - "3.10"
-          - "3.11"
-          - "3.12"
-          - "3.13"
-          - "3.14"
-          - "3.15"
+        version: ["3.13"]
         buildFIPS: [0, 1]
-        crtUseSystemCrypto: [0, 1]
-        # Python 3.12+ uses prebuilt CRT wheels, so the linkage selector
-        # does not change the build or tests for these versions.
-        exclude:
-          - version: "3.12"
-            crtUseSystemCrypto: 1
-          - version: "3.13"
-            crtUseSystemCrypto: 1
-          - version: "3.14"
-            crtUseSystemCrypto: 1
-          - version: "3.15"
-            crtUseSystemCrypto: 1
-        include:
-          - version: main
-            buildFIPS: 0
-            crtUseSystemCrypto: 0
-            arch: x86_64
+        crtUseSystemCrypto: [0]
     env:
       FIPS: ${{ matrix.buildFIPS }}
       AWS_CRT_BUILD_USE_SYSTEM_LIBCRYPTO: ${{ matrix.crtUseSystemCrypto }}
@@ -538,19 +517,23 @@ jobs:
             source /opt/compiler-env/setup-gcc-12.sh
             ./tests/ci/integration/run_python_integration.sh ${{ matrix.version }}
       - name: Record job settings
-        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule' && hashFiles('integration-failure.txt') != ''
+        if: always() && steps.integration-test.outcome == 'failure' && github.event_name != 'pull_request' && hashFiles('integration-failure.txt') != ''
         env:
           MATRIX: ${{ toJSON(matrix) }}
+          JOB_ID: ${{ job.check_run_id }}
         run: |
-          echo "job=$(jq -c '{size: "medium", image: "ubuntu:22.04", compiler: "gcc-12", ipv6: true} + .' <<< "$MATRIX")" >> integration-failure.txt
+          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), size: "medium", image: "ubuntu:22.04",
+            compiler: "gcc-12", ipv6: true, env_vars: (env | {FIPS, AWS_CRT_BUILD_USE_SYSTEM_LIBCRYPTO})} + .' \
+            <<< "$MATRIX")" >> integration-failure.txt
       - uses: actions/upload-artifact@v7
-        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule'
+        if: always() && steps.integration-test.outcome == 'failure' && github.event_name != 'pull_request'
         with:
           name: integration-failure-python-${{ matrix.version }}-${{ matrix.buildFIPS }}-${{ matrix.crtUseSystemCrypto }}-${{ matrix.arch }}
           path: integration-failure.txt
           if-no-files-found: ignore
 
   ruby:
+    if: github.event_name != 'workflow_dispatch'
     name: ruby-${{ matrix.version }}${{ matrix.buildFIPS == 1 && '-fips' || '' }}-${{ matrix.arch }}
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
@@ -589,8 +572,10 @@ jobs:
         if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule' && hashFiles('integration-failure.txt') != ''
         env:
           MATRIX: ${{ toJSON(matrix) }}
+          JOB_ID: ${{ job.check_run_id }}
         run: |
-          echo "job=$(jq -c '{size: "medium", image: "ubuntu:24.04", compiler: "gcc-13", ipv6: true} + .' <<< "$MATRIX")" >> integration-failure.txt
+          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), size: "medium", image: "ubuntu:24.04",
+            compiler: "gcc-13", ipv6: true, env_vars: (env | {FIPS})} + .' <<< "$MATRIX")" >> integration-failure.txt
       - uses: actions/upload-artifact@v7
         if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule'
         with:

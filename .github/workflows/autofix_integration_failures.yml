@@ -2,28 +2,24 @@ name: autofix
 
 on:
   workflow_run:
-    workflows: [integration-omnibus]
+    workflows: ["integration-omnibus"]
     types: [completed]
   workflow_dispatch:
     inputs:
       run_id:
         description: ID of a failed integration-omnibus run to repair
         required: true
-      source_repo:
-        description: Repository that ran the omnibus, e.g. aws/aws-lc
-        required: true
-        default: aws/aws-lc
 
 permissions:
   contents: read
 
 env:
+  TARGET_RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id }}
   WORK_DIR: ${{ github.workspace }}/autofix-work
-  RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id }}
-  SOURCE_REPO: ${{ inputs.source_repo || github.repository }}
 
 jobs:
-  recognize:
+  get-failing-integrations:
+    name: get-failing-integrations
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.conclusion == 'failure')
@@ -32,78 +28,99 @@ jobs:
       contents: read
       actions: read
     outputs:
-      reason: ${{ steps.recognize.outputs.reason }}
-      verify: ${{ steps.recognize.outputs.verify }}
+      targets: ${{ steps.targets.outputs.targets }}
     steps:
-      - &checkout
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - &setup-python
-        uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - &install
-        run: pip install -r tests/ci/integration/autofix/requirements.txt
+      - run: pip install -r tests/ci/integration/autofix/requirements.txt
       - uses: actions/download-artifact@v8
         with:
           pattern: integration-failure-*
           path: autofix-reports
-          run-id: ${{ env.RUN_ID }}
-          repository: ${{ env.SOURCE_REPO }}
+          run-id: ${{ env.TARGET_RUN_ID }}
           github-token: ${{ github.token }}
-      - name: Find the commit the omnibus tested
+      - name: Find the aws-lc commit the omnibus tested
         id: omnibus
         env:
           GH_TOKEN: ${{ github.token }}
-        run: echo "sha=$(gh api "repos/$SOURCE_REPO/actions/runs/$RUN_ID" --jq .head_sha)" >> "$GITHUB_OUTPUT"
-      - name: List the failing targets
-        id: recognize
+        run: echo "sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$TARGET_RUN_ID" --jq .head_sha)" >> "$GITHUB_OUTPUT"
+      - name: Collect failing targets
+        id: targets
         working-directory: tests/ci/integration
         env:
           AWSLC_SHA: ${{ steps.omnibus.outputs.sha }}
+        run: echo "targets=$(python -m autofix recognize "$GITHUB_WORKSPACE/autofix-reports")" >> "$GITHUB_OUTPUT"
+      - name: Download each failing integration's logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGETS: ${{ steps.targets.outputs.targets }}
         run: |
-          matrix=$(python -m autofix recognize --reports "$GITHUB_WORKSPACE/autofix-reports" \
-            --awslc-repo "https://github.com/$SOURCE_REPO.git" --awslc-sha "$AWSLC_SHA")
-          jq -r '"reason=\(.reason | tojson)", "verify=\(.verify | tojson)"' <<< "$matrix" >> "$GITHUB_OUTPUT"
+          set -o pipefail
+          for log in $(jq -r '.[] | "\(.name)/\(.target.environments[].job_id | select(. != 0))"' <<< "$TARGETS"); do
+            target=${log%/*} job_id=${log#*/}
+            mkdir -p "autofix/$target"
+            # Drop ANSI color codes, then every byte that is not tab, newline, or printable ASCII.
+            gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs" \
+              | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' | tr -cd '\t\n -~' > "autofix/$log.log"
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: autofix-logs
+          # Save the logs folder so the `reason` job find the logs.
+          path: autofix/
+          if-no-files-found: ignore
 
   reason:
     name: reason (${{ matrix.name }})
-    needs: recognize
-    if: needs.recognize.outputs.reason != '[]'
+    needs: get-failing-integrations
+    if: needs.get-failing-integrations.outputs.targets != '[]'
     strategy: &per-target
       fail-fast: false
       max-parallel: 5
       matrix:
-        include: ${{ fromJSON(needs.recognize.outputs.reason) }}
+        include: ${{ fromJSON(needs.get-failing-integrations.outputs.targets) }}
+    # Run on a CodeBuild image with the same arch as the failed job.
     runs-on: &codebuild
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
         image:${{ matrix.arch == 'aarch64' && 'arm-3.0' || 'linux-5.0' }}
         instance-size:small
     permissions:
       contents: read
-      actions: read
       id-token: write
     env: &target
       TARGET: ${{ toJSON(matrix.target) }}
     steps:
-      - *checkout
-      - *setup-python
-      - *install
-      - name: Download the failed job logs
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p "$WORK_DIR/out/logs"
-          for job_id in $(jq -r '.environments[].job_id | select(. != 0)' <<< "$TARGET"); do
-            gh api "repos/$SOURCE_REPO/actions/jobs/$job_id/logs" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' |
-              tr -cd '\11\12\40-\176' > "$WORK_DIR/out/logs/$job_id.log"
-          done
-      # Log in with the runner's own role before assuming the Bedrock role, which cannot pull images.
-      - &ecr
-        name: Login to Amazon ECR
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - &install
+        run: python3 -m pip install -r tests/ci/integration/autofix/requirements.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: autofix-logs
+          path: autofix
+      - env:
+          NAME: ${{ matrix.name }}
+        run: mkdir -p "$WORK_DIR/out" && mv "autofix/$NAME" "$WORK_DIR/out/logs"
+      # Log in to ECR with the runner's own role to pull the CI images, which the Bedrock role cannot pull.
+      - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
+      - name: Pull this arch's CI images and log out of ECR before the agent starts
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # Pull the images the replays need now. Then log out so the agent cannot reach ECR.
+          for image in $(jq -r --arg arch "$ARCH" '[.environments[] | select(.arch == $arch).image] | unique[]' <<< "$TARGET"); do
+            docker pull -q "$ECR_REGISTRY/aws-lc/$image"
+          done
+          docker logout "$ECR_REGISTRY"
       - &bedrock-region
         name: Load shared Bedrock settings
         run: jq -r '"AWS_REGION=\(.aws_region)"' .github/workflows/ai-config.json >> "$GITHUB_ENV"
@@ -112,144 +129,58 @@ jobs:
         with:
           oidcRole: AwsLcGitHubActionsAutofixOidcRole
           roleName: AwsLcGitHubActionsBedrockRole
-      - &block-metadata
-        name: Block containers from the instance and CodeBuild credential endpoints
+      - name: Block containers from the instance and CodeBuild credential endpoints
         run: |
           sudo iptables -I DOCKER-USER -d 169.254.169.254 -j DROP
           sudo iptables -I DOCKER-USER -d 169.254.170.2 -j DROP
-      - name: Fix the integration and verify it
+      - name: Fix the integration and replay the fix
         working-directory: tests/ci/integration
-        env: &registry
+        env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: python -m autofix reason
+        run: python3 -m autofix reason
       - &upload
         uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: autofix-${{ matrix.name }}-${{ github.job }}-${{ matrix.arch }}
+          name: autofix-${{ matrix.name }}
           path: autofix-work/out/
-          if-no-files-found: ignore
-      - &summary
-        name: Summarize the failure on the run page
-        if: failure()
-        env:
-          HEADING: "${{ github.job }} ${{ matrix.name }} on ${{ matrix.arch }} failed"
-          OUT: autofix-work/out
-        run: |
-          {
-            echo "## $HEADING"
-            jq -r 'if has("safe") then "**review**: safe=\(.safe)", (.findings[] | "- \(.)")
-                   else "**verify**: passed=\(.passed)\n~~~\n\(.report[-3000:])\n~~~" end' \
-              "$OUT"/verify-*.json "$OUT"/review.json 2>/dev/null || true
-            echo "Open the job log for the error."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  verify:
-    name: verify (${{ matrix.name }}, ${{ matrix.arch }})
-    needs: [recognize, reason]
-    if: ${{ !cancelled() && needs.recognize.result == 'success' && needs.recognize.outputs.verify != '[]' }}
-    strategy:
-      fail-fast: false
-      max-parallel: 5
-      matrix:
-        include: ${{ fromJSON(needs.recognize.outputs.verify) }}
-    runs-on: *codebuild
-    env: *target
-    steps:
-      - *checkout
-      - *setup-python
-      - *install
-      - &results
-        uses: actions/download-artifact@v8
-        with:
-          pattern: autofix-${{ matrix.name }}-{reason,verify,review}-{x86_64,aarch64}
-          path: autofix-work/out/
-          merge-multiple: true
-      - *ecr
-      - *block-metadata
-      - name: Replay the failed CI jobs with the fix
-        working-directory: tests/ci/integration
-        env: *registry
-        run: python -m autofix verify
-      - *upload
-      - *summary
+          overwrite: true
 
   review:
     name: review (${{ matrix.name }})
-    needs: [recognize, reason, verify]
-    if: &has-targets ${{ !cancelled() && needs.recognize.result == 'success' && needs.recognize.outputs.reason != '[]' }}
+    needs: [get-failing-integrations, reason]
+    if: ${{ !cancelled() && needs.reason.result != 'skipped' }}
     strategy: *per-target
     runs-on: *codebuild
+    timeout-minutes: 60
     permissions:
       contents: read
       id-token: write
     env: *target
     steps:
-      - *checkout
-      - *setup-python
-      - *install
-      - *results
-      - *bedrock-region
-      - *bedrock
-      - name: Review the verified fix
-        working-directory: tests/ci/integration
-        run: python -m autofix review
-      - *upload
-      - *summary
-
-  resolve:
-    name: resolve (${{ matrix.name }})
-    needs: [recognize, review]
-    if: *has-targets
-    strategy: *per-target
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env: *target
-    steps:
-      - *checkout
       - uses: actions/checkout@v7
         with:
-          repository: ${{ env.SOURCE_REPO }}
-          ref: ${{ matrix.target.awslc.sha }}
-          path: aws-lc-fix
-          fetch-depth: 0
           persist-credentials: false
-      - *setup-python
       - *install
-      - *results
-      - name: Commit the fix
-        id: commit
+      - uses: actions/download-artifact@v8
+        with:
+          name: autofix-${{ matrix.name }}
+          path: autofix-work/out/
+      - *bedrock-region
+      - *bedrock
+      - name: Review the fix
         working-directory: tests/ci/integration
-        run: |
-          pr=$(python -m autofix resolve --checkout "$GITHUB_WORKSPACE/aws-lc-fix")
-          jq -r '"branch=\(.branch)", "title=\(.title)"' <<< "$pr" >> "$GITHUB_OUTPUT"
-      - uses: actions/create-github-app-token@v2
-        id: fork-token
-        with:
-          app-id: ${{ vars.AUTOFIX_APP_ID }}
-          private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
-          owner: crypto-alg
-          repositories: aws-lc
-          permission-contents: write
-      - uses: actions/create-github-app-token@v2
-        id: upstream-token
-        with:
-          app-id: ${{ vars.AUTOFIX_APP_ID }}
-          private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-pull-requests: write
-      - name: Push the fix to crypto-alg and open a draft PR
         env:
-          FORK_TOKEN: ${{ steps.fork-token.outputs.token }}
-          UPSTREAM_TOKEN: ${{ steps.upstream-token.outputs.token }}
-          BRANCH: ${{ steps.commit.outputs.branch }}
-          TITLE: ${{ steps.commit.outputs.title }}
-        run: |
-          GH_TOKEN="$FORK_TOKEN" gh auth setup-git
-          GH_TOKEN="$FORK_TOKEN" git -C aws-lc-fix -c core.hooksPath=/dev/null push -q \
-            https://github.com/crypto-alg/aws-lc.git "HEAD:refs/heads/$BRANCH"
-          GH_TOKEN="$UPSTREAM_TOKEN" gh pr create --draft --repo "$GITHUB_REPOSITORY" --head "crypto-alg:$BRANCH" \
-            --title "$TITLE" --body-file autofix-work/out/pr.md
-      - *summary
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 -m autofix review
+      - *upload
+
+  resolve:
+    needs: [get-failing-integrations, review]
+    if: ${{ !cancelled() && needs.review.result != 'skipped' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/autofix_resolve.yml
+    with:
+      targets: ${{ needs.get-failing-integrations.outputs.targets }}

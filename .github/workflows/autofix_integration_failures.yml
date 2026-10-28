@@ -24,6 +24,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.conclusion == 'failure')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       actions: read
@@ -60,6 +61,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TARGETS: ${{ steps.targets.outputs.targets }}
         run: |
+          set -o pipefail
           strip_colors() { sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g'; }
           keep_printable_ascii() { tr -cd '\t\n -~'; }
           for log in $(jq -r '.[] | "\(.name)/\(.target.environments[].job_id | select(. != 0))"' <<< "$TARGETS"); do
@@ -89,6 +91,7 @@ jobs:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
         image:${{ matrix.arch == 'aarch64' && 'arm-3.0' || 'linux-5.0' }}
         instance-size:small
+    timeout-minutes: 360
     permissions:
       contents: read
       id-token: write
@@ -150,9 +153,10 @@ jobs:
   review:
     name: review (${{ matrix.name }})
     needs: [get-failing-integrations, reason]
-    if: &reasoned ${{ !cancelled() && needs.reason.result != 'skipped' }}
+    if: ${{ !cancelled() && needs.reason.result != 'skipped' }}
     strategy: *per-target
     runs-on: *codebuild
+    timeout-minutes: 60
     permissions:
       contents: read
       id-token: write
@@ -162,8 +166,7 @@ jobs:
         with:
           persist-credentials: false
       - *install
-      - &results
-        uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8
         with:
           name: autofix-${{ matrix.name }}
           path: autofix-work/out/
@@ -171,66 +174,17 @@ jobs:
       - *bedrock
       - name: Review the fix
         working-directory: tests/ci/integration
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python3 -m autofix review
       - *upload
 
   resolve:
-    name: resolve (${{ matrix.name }})
-    needs: [get-failing-integrations, reason, review]
-    if: *reasoned
-    strategy: *per-target
-    runs-on:
-      - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
-        image:linux-5.0
-        instance-size:small
+    needs: [get-failing-integrations, review]
+    if: ${{ !cancelled() && needs.review.result != 'skipped' }}
     permissions:
       contents: read
       id-token: write
-    env: *target
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ matrix.target.awslc.sha }}
-          path: aws-lc-fix
-          fetch-depth: 0
-          persist-credentials: false
-      - *install
-      - *results
-      - name: Commit the fix
-        id: commit
-        working-directory: tests/ci/integration
-        env:
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: python3 -m autofix resolve "$GITHUB_WORKSPACE/aws-lc-fix" >> "$GITHUB_OUTPUT"
-      - *bedrock-region
-      - uses: ./.github/actions/configure-aws-credentials
-        with:
-          oidcRole: AwsLcGitHubActionsAutofixOidcRole
-          roleName: AwsLcGitHubActionsGetAutofixPatRole
-      - uses: aws-actions/aws-secretsmanager-get-secrets@v2
-        with:
-          secret-ids: |
-            PUSH_TOKEN,aws-lc/ci/autofix-push-token
-            APP_PRIVATE_KEY,acl-ci/credentials
-      - uses: actions/create-github-app-token@v2
-        id: pr-token
-        with:
-          app-id: ${{ vars.AUTOFIX_APP_ID }}
-          private-key: ${{ env.APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-pull-requests: write
-      - name: Push the fix to crypto-alg and open a draft PR
-        env:
-          PR_TOKEN: ${{ steps.pr-token.outputs.token }}
-          BRANCH: ${{ steps.commit.outputs.branch }}
-          TITLE: ${{ steps.commit.outputs.title }}
-        run: |
-          GH_TOKEN="$PUSH_TOKEN" gh auth setup-git
-          GH_TOKEN="$PUSH_TOKEN" git -C aws-lc-fix -c core.hooksPath=/dev/null push -q \
-            https://github.com/crypto-alg/aws-lc.git "+HEAD:refs/heads/$BRANCH"
-          GH_TOKEN="$PR_TOKEN" gh pr create --draft --no-maintainer-edit --repo "$GITHUB_REPOSITORY" --head "crypto-alg:$BRANCH" \
-            --title "$TITLE" --body-file autofix-work/out/pr.md
+    uses: ./.github/workflows/autofix_resolve.yml
+    with:
+      targets: ${{ needs.get-failing-integrations.outputs.targets }}

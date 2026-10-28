@@ -15,16 +15,25 @@ from strands.sandbox.docker import DockerSandbox
 from .git import Git
 from .target import IntegrationTarget
 
-_RUNNER_TIMEOUT = 3600
+RUNNER_TIMEOUT = 3600
 _COMMAND_TIMEOUT = 120
 _READ_ONLY_PROGRAMS = {"grep", "ls", "cat", "head", "tail", "wc", "diff"}
 _GIT_READ_COMMANDS = {"log", "show", "diff", "blame", "grep", "ls-files"}
-_GIT_BLOCKED_FLAGS = ("-c", "-O", "--open-files-in-pager", "--output", "--ext-diff")
+_GIT_BLOCKED_OPTIONS = ("--open-files-in-pager", "--output", "--ext-diff")
 _SED_PRINT_RANGE = re.compile(r"\d+,\d+[pl]")
 _CONTAINER_AWSLC = Path("/aws-lc")
 _CONTAINER_SRC = Path("/autofix-src")
 _NEEDS_NETWORK = {"accp", "bind9", "crt", "grpc", "httpd", "librdkafka", "nmap", "ntp", "pyopenssl", "python",
                   "rust_openssl", "xtrabackup"}
+
+
+# Return whether a git option can start a program or write a file, counting abbreviations and bundled short flags.
+# Example: "--open=sh", "--outp=x", and "-iOsh" return True, and "--oneline" and "-5" return False.
+def _runs_or_writes(arg: str) -> bool:
+    name = arg.split("=", 1)[0]
+    if name.startswith("--"):
+        return len(name) > 2 and any(option.startswith(name) for option in _GIT_BLOCKED_OPTIONS)
+    return name.startswith("-") and "O" in name
 
 
 class ReplayResult(BaseModel):
@@ -49,6 +58,7 @@ class Sandbox:
         self.src = self.root / "src"
         for repo in target.repos:
             Git.clone(repo, self.src / repo.name)
+        self.git_repos = {"aws-lc", *(f"src/{repo.name}" for repo in target.repos)}
 
         patch_dirs = target.patch_dirs(self.awslc.path)
         for patch_dir in patch_dirs:
@@ -91,8 +101,8 @@ class Sandbox:
         """Run one allowlisted read-only command in the sandbox and return its output and exit code.
 
         Pass the command as a list of arguments, not a shell string. Pipes, redirects, globs, and variables do not work.
-        Allowed: git log, show, diff, blame, grep, or ls-files; patch --dry-run; sed -n 'START,ENDp' or 'START,ENDl';
-        grep, ls, cat, head, tail, wc, and diff.
+        Allowed: git -C aws-lc or src/<repo> with log, show, diff, blame, grep, or ls-files; patch --dry-run;
+        sed -n 'START,ENDp' or 'START,ENDl'; grep, ls, cat, head, tail, wc, and diff.
         """
         self._check(argv)
         result = await tool_context.agent.sandbox.execute(shlex.join(argv), timeout=_COMMAND_TIMEOUT)
@@ -100,13 +110,12 @@ class Sandbox:
 
     # Raise ValueError naming the rule a command breaks, so only read-only allowlisted commands reach the sandbox.
     # Example: ["sed", "-n", "10,20l", "x.patch"] passes, ["sed", "-i", "s/a/b/", "x.patch"] raises.
-    @staticmethod
-    def _check(argv: list[str]) -> None:
+    def _check(self, argv: list[str]) -> None:
         match argv:
             case [program, *_] if program in _READ_ONLY_PROGRAMS:
                 return
-            case ["git", "-C", _, command, *args] | ["git", command, *args] if (
-                    command in _GIT_READ_COMMANDS and not any(arg.startswith(_GIT_BLOCKED_FLAGS) for arg in args)):
+            case ["git", "-C", repo, command, *args] if (
+                    repo in self.git_repos and command in _GIT_READ_COMMANDS and not any(map(_runs_or_writes, args))):
                 return
             case ["patch", *args] if "--dry-run" in args and "-e" not in args and "--ed" not in args:
                 return
@@ -126,25 +135,33 @@ class Sandbox:
         copy = self.awslc.copy(self.root)
         copy.apply(diff)
         passed, reports = True, []
-        for env in self.jobs:
-            container = self.docker.containers.run(
-                f"{self.images}/{env.image}",
-                ["bash", "-c", self.target.script(env)],
-                working_dir=str(_CONTAINER_AWSLC),
-                volumes=[
-                    f"{copy.path}:{_CONTAINER_AWSLC}:rw",
-                    *(f"{copy.path / path}:{_CONTAINER_AWSLC / path}:ro" for path in [".git", *self.editable]),
-                    f"{self.src}:{_CONTAINER_SRC}:ro",
-                ],
-                network_mode="bridge" if self.target.name in _NEEDS_NETWORK else "none",
-                environment=env.env_vars | git_env,
-                sysctls={"net.ipv6.conf.all.disable_ipv6": "0"} if env.ipv6 else {},
-                detach=True,
-            )
-            try:
-                exit_code = container.wait(timeout=_RUNNER_TIMEOUT)["StatusCode"]
-                passed &= exit_code == 0
-                reports.append(f"{env.arch}/{env.image}: exit {exit_code}\n{container.logs().decode(errors='replace')}")
-            finally:
-                container.remove(force=True)
+        try:
+            for env in self.jobs:
+                container = self.docker.containers.run(
+                    f"{self.images}/{env.image}",
+                    ["bash", "-c", self.target.script(env)],
+                    working_dir=str(_CONTAINER_AWSLC),
+                    volumes=[
+                        f"{copy.path}:{_CONTAINER_AWSLC}:rw",
+                        *(f"{copy.path / path}:{_CONTAINER_AWSLC / path}:ro" for path in [".git", *self.editable]),
+                        f"{self.src}:{_CONTAINER_SRC}:ro",
+                    ],
+                    network_mode="bridge" if self.target.name in _NEEDS_NETWORK else "none",
+                    environment=env.env_vars | git_env,
+                    sysctls={"net.ipv6.conf.all.disable_ipv6": "0"} if env.ipv6 else {},
+                    security_opt=["no-new-privileges"],
+                    detach=True,
+                )
+                try:
+                    exit_code = container.wait(timeout=RUNNER_TIMEOUT)["StatusCode"]
+                    passed &= exit_code == 0
+                    reports.append(f"{env.arch}/{env.image}: exit {exit_code}\n{container.logs().decode(errors='replace')}")
+                finally:
+                    container.remove(force=True)
+        finally:
+            # Delete the copy from a container. The replay leaves files that only the container's root can delete.
+            self.docker.containers.run(
+                f"{self.images}/{self.jobs[0].image}", ["find", str(_CONTAINER_AWSLC), "-mindepth", "1", "-delete"],
+                volumes=[f"{copy.path}:{_CONTAINER_AWSLC}:rw"], network_mode="none", remove=True)
+            copy.path.rmdir()
         return ReplayResult(passed=passed, report="\n\n".join(reports))

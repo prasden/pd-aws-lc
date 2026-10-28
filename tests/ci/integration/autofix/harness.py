@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 import re
 import threading
@@ -14,14 +13,15 @@ from strands.tools.executors import SequentialToolExecutor
 from strands.types.agent import Limits
 from strands_harness import create_harness
 
-from .git import Git, Repo
-from .sandbox import RUNNER_TIMEOUT, Sandbox, ReplayResult
-from .target import Environment, IntegrationTarget
+from .git import Git
+from .sandbox import Sandbox, ReplayResult
+from .target import IntegrationTarget
 
 _AI_CONFIG = json.loads((Path(__file__).parents[4] / ".github/workflows/ai-config.json").read_text())
 _MODEL = f"bedrock/{_AI_CONFIG['opus']}"
 _LIMITS = Limits(turns=150, total_tokens=6_000_000)
 _TIMEOUT = 45 * 60
+_REASON_TIMEOUT = 60 * 60
 _PROMPTS = Path(__file__).parent / "prompts"
 _LICENSE = ("By submitting this pull request, I confirm that my contribution is made under the terms of the "
             "Apache 2.0 license and the ISC license.")
@@ -39,31 +39,6 @@ _INVISIBLE_CATEGORIES = {"Cc", "Cf", "Cn", "Zl", "Zp"}
 class ReviewVerdict(BaseModel):
     safe: bool
     findings: list[str] = []
-
-
-# Build the job matrix from the integration-failure.txt reports under a folder: one reason job per target.
-def recognize(reports: Path, awslc: Repo) -> list[dict]:
-    texts = [report.read_text() for report in reports.rglob("integration-failure.txt")]
-    return [{"name": target.dir_name, "arch": min(target.arches, key=lambda arch: arch != "x86_64"),
-             "target": target.model_dump(mode="json")} for target in _parse_reports(texts, awslc)]
-
-
-# Group integration-failure.txt reports into one target per integration and version, skipping any bad report.
-def _parse_reports(reports: list[str], awslc: Repo) -> list[IntegrationTarget]:
-    targets: dict[tuple[str, str], IntegrationTarget] = {}
-    for report in sorted(reports):
-        try:
-            head, *lines = report.splitlines()
-            name, version = head.split("\t")
-            repos = [Repo(*line.removeprefix("commit=").split()) for line in lines if line.startswith("commit=")]
-            env = Environment.model_validate_json(lines[-1].removeprefix("job="))
-            target = targets.setdefault((name, version), IntegrationTarget(
-                name=name, version=version, awslc=awslc, repos=repos, environments=[]))
-        except (ValueError, IndexError) as error:
-            logging.warning("skipping a bad integration-failure.txt: %s", error)
-            continue
-        target.environments.append(env)
-    return list(targets.values())
 
 
 class Harness:
@@ -108,8 +83,8 @@ class Harness:
         finally:
             timer.cancel()
 
-    # Let the agent repair the target with run_integration as its feedback loop, then record whether the final patch passes.
     def reason(self, registry: str) -> ReplayResult:
+        """Let the agent fix the target, then replay its final diff and record whether it passes."""
         sandbox = Sandbox(self.work_dir, self.target, registry)
         instructions = (_PROMPTS / "agent.md").read_text().format(
             name=self.target.name,
@@ -118,9 +93,8 @@ class Harness:
             repos=", ".join(f"`src/{repo.name}` ({repo.url} at {repo.sha})" for repo in self.target.repos),
             editable=", ".join(f"`aws-lc/{path}`" for path in sandbox.editable),
         )
-        timeout = _TIMEOUT + 2 * len(sandbox.jobs) * RUNNER_TIMEOUT
         with sandbox.agent_container() as container:
-            final_message = self._run_agent(instructions, "Start by reading the logs.", timeout, {}, sandbox=container,
+            final_message = self._run_agent(instructions, "Start by reading the logs.", _REASON_TIMEOUT, {}, sandbox=container,
                                             tools=[sandbox.run_integration, sandbox.run],
                                             builtin_tools=["read", "write", "edit"])
         if final_message.stop_reason != "end_turn":
@@ -132,9 +106,11 @@ class Harness:
         (self.out / "replay.json").write_text(result.model_dump_json(indent=2))
         return result
 
-    # Judge a replayed fix with the fixed rules, then with a reviewer model that sees only the diff, description, and logs.
-    # Write pr.md only for a safe fix. The resolve job opens a PR only when pr.md exists.
     def review(self, run_url: str) -> ReviewVerdict:
+        """Judge a replayed fix by the fixed rules, then by a reviewer model that sees only the diff, description, and logs.
+
+        Write pr.md only for a safe fix. The resolve job opens a PR only when pr.md exists.
+        """
         if not ReplayResult.model_validate_json((self.out / "replay.json").read_text()).passed:
             verdict = ReviewVerdict(safe=False, findings=["The fix did not pass every failed CI job."])
         elif not self._follows_rules():
@@ -151,9 +127,8 @@ class Harness:
             (self.out / "pr.md").write_text(f"{self.description.strip()}\n\n{bot}\n\n{_LICENSE}\n")
         return verdict
 
-    # Check for secrets leakage, hidden text, or edits outside the integration/ directory.
-    # A hardening for defense in depth.
     def _follows_rules(self) -> bool:
+        """Return whether the diff edits only the runner and its .patch files, with no secrets or hidden text."""
         diff = self.diff
         if not diff:
             return False

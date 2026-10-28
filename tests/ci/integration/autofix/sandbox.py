@@ -27,9 +27,11 @@ _NEEDS_NETWORK = {"accp", "bind9", "crt", "grpc", "httpd", "librdkafka", "nmap",
                   "rust_openssl", "xtrabackup"}
 
 
-# Return whether a git option can start a program or write a file, counting abbreviations and bundled short flags.
-# Example: "--open=sh", "--outp=x", and "-iOsh" return True, and "--oneline" and "-5" return False.
 def _runs_or_writes(arg: str) -> bool:
+    """Return whether a git option can start a program or write a file.
+
+    Abbreviations and bundled short flags count, so "--outp=x" and "-iOsh" match but "--oneline" does not.
+    """
     name = arg.split("=", 1)[0]
     if name.startswith("--"):
         return len(name) > 2 and any(option.startswith(name) for option in _GIT_BLOCKED_OPTIONS)
@@ -43,9 +45,9 @@ class ReplayResult(BaseModel):
 
 class Sandbox:
     def __init__(self, root: Path, target: IntegrationTarget, registry: str):
-        """Clone aws-lc and the downstream repos under root at their failing commits, and fix what the agent may edit.
+        """Clone aws-lc and the downstream repos at their failing commits, and set what the agent may edit.
 
-        Only the failed jobs of this machine's arch are replayed, and a machine with none of them raises.
+        Raise ValueError if this machine's arch has no failed job to replay.
         """
         self.jobs = target.on(platform.machine())
         if not self.jobs:
@@ -69,8 +71,7 @@ class Sandbox:
     def agent_container(self) -> Iterator[DockerSandbox]:
         """Run the agent's container and remove it on exit.
 
-        The sandbox is read-only except the patch dirs and runner script, with no network, no capabilities, and the host user.
-        The agent's file tools and run tool run inside it through docker exec.
+        Everything is read-only except the editable paths. The container has no network and no capabilities.
         """
         container = self.docker.containers.run(
             f"{self.images}/{self.jobs[0].image}",
@@ -108,9 +109,8 @@ class Sandbox:
         result = await tool_context.agent.sandbox.execute(shlex.join(argv), timeout=_COMMAND_TIMEOUT)
         return {"output": result.stdout, "error": result.stderr, "exit_code": result.exit_code}
 
-    # Raise ValueError naming the rule a command breaks, so only read-only allowlisted commands reach the sandbox.
-    # Example: ["sed", "-n", "10,20l", "x.patch"] passes, ["sed", "-i", "s/a/b/", "x.patch"] raises.
     def _check(self, argv: list[str]) -> None:
+        """Raise ValueError unless the command is on the read-only allowlist."""
         match argv:
             case [program, *_] if program in _READ_ONLY_PROGRAMS:
                 return
@@ -125,10 +125,10 @@ class Sandbox:
 
     @cache
     def replay(self, diff: str) -> ReplayResult:
-        """Replay a diff on a fresh copy of aws-lc in every failed CI job of this arch, the way CI ran them.
+        """Apply a diff to a fresh copy of aws-lc and rerun this arch's failed CI jobs on it.
 
-        The patches and .git are read-only, and each job's git clones copy the local downstream repos. Each diff runs
-        once, so the check after the agent stops reuses the agent's last replay of the same changes.
+        The jobs clone downstream repos from the local copies, not the network.
+        The same diff is never replayed twice. The final check reuses the agent's last run.
         """
         git_env = Git.config_env({"safe.directory": "*"} | {
             f"url.file://{_CONTAINER_SRC / repo.name}.insteadOf": repo.url for repo in self.target.repos})

@@ -151,7 +151,8 @@ int ECDSA_do_verify(const uint8_t *digest, size_t digest_len,
                     const ECDSA_SIG *sig, const EC_KEY *eckey) {
   boringssl_ensure_ecc_self_test();
 
-  return ecdsa_do_verify_no_self_test(digest, digest_len, sig, eckey);
+  ecdsa_do_verify_no_self_test(digest, digest_len, sig, eckey);
+  return 0;
 }
 
 static ECDSA_SIG *ecdsa_sign_impl(const EC_GROUP *group, int *out_retry,

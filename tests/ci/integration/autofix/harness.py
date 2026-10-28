@@ -1,0 +1,172 @@
+import json
+import os
+import re
+import threading
+import unicodedata
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Self
+
+from pydantic import BaseModel
+from strands import ModelRetryStrategy, tool
+from strands.agent import AgentResult
+from strands.tools.executors import SequentialToolExecutor
+from strands.types.agent import Limits
+from strands_harness import create_harness
+
+from .git import Git
+from .sandbox import Sandbox, ReplayResult
+from .target import IntegrationTarget
+
+_MODEL = f"bedrock/{json.loads((Path(__file__).parents[4] / '.github/workflows/ai-config.json').read_text())['opus']}"
+_LIMITS = Limits(turns=150, total_tokens=6_000_000)
+_TIMEOUT = 45 * 60
+_REASON_TIMEOUT = 60 * 60
+_PROMPTS = Path(__file__).parent / "prompts"
+_READ_LOG_MAX_LINES = 2000
+_LICENSE = ("By submitting this pull request, I confirm that my contribution is made under the terms of the "
+            "Apache 2.0 license and the ISC license.")
+_SECRET_PATTERNS = (
+    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    re.compile(r"aws_secret_access_key\s*=\s*\S+", re.I),
+    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"),
+    re.compile(r"\b(?:Bearer|Authorization:)\s+[A-Za-z0-9._\-]{20,}"),
+    re.compile(r"https?://\S*\.(?:amazon|a2z|aws\.dev|corp)\b\S*"),
+)
+_INVISIBLE_CATEGORIES = {"Cc", "Cf", "Cn", "Zl", "Zp"}
+
+
+class ReviewVerdict(BaseModel):
+    safe: bool
+    findings: list[str] = []
+
+
+class _BedrockRetry(ModelRetryStrategy):
+    """Retry brief Bedrock outages as well as throttling, so one bad call does not end an hour-long repair."""
+
+    def is_retryable(self, exception: Exception) -> bool:
+        transient = ("serviceUnavailableException", "internalServerException", "modelStreamErrorException")
+        return super().is_retryable(exception) or any(code in str(exception) for code in transient)
+
+
+class Harness:
+    def __init__(self, work_dir: Path, target: IntegrationTarget):
+        self.work_dir = work_dir
+        self.target = target
+        self.out = work_dir / "out"
+        self.logs = {log.name: log for log in sorted((self.out / "logs").glob("*.log"))}
+
+    @classmethod
+    def from_env(cls) -> Self:
+        return cls(Path(os.environ["WORK_DIR"]), IntegrationTarget.model_validate_json(os.environ["TARGET"]))
+
+    @staticmethod
+    def _run_agent(instructions: str, message: str, timeout: int, **options: Any) -> AgentResult:
+        agent = create_harness(**{
+            "model": _MODEL,
+            "instructions": instructions,
+            "builtin_tools": [],
+            "builtin_plugins": [],
+            "session": False,
+            "memory": False,
+            "skills": False,
+            "background_tasks": False,
+            "tool_executor": SequentialToolExecutor(),
+            "retry_strategy": _BedrockRetry(),
+        } | options)
+        timer = threading.Timer(timeout, agent.cancel)
+        timer.start()
+        try:
+            return agent(message, limits=_LIMITS)
+        finally:
+            timer.cancel()
+
+    def reason(self, registry: str) -> ReplayResult:
+        sandbox = Sandbox(self.work_dir, self.target, registry)
+        instructions = (_PROMPTS / "agent.md").read_text().format(
+            name=self.target.name,
+            version=self.target.version,
+            root=sandbox.root,
+            repos=", ".join(f"`src/{repo.name}` ({repo.url} at {repo.sha})" for repo in self.target.repos),
+            editable=", ".join(f"`aws-lc/{path}`" for path in sandbox.editable),
+        )
+        with sandbox.agent_container() as container:
+            final_message = self._run_agent(
+                instructions,
+                "Start by reading the logs.",
+                _REASON_TIMEOUT,
+                sandbox=container,
+                tools=[sandbox.run_integration, sandbox.run],
+                builtin_tools=["read", "write", "edit"],
+            )
+        if final_message.stop_reason != "end_turn":
+            raise RuntimeError(f"{self.target.dir_name}: the agent stopped early ({final_message.stop_reason})")
+
+        diff = sandbox.awslc.diff(sandbox.editable)
+        (self.out / "changes.diff").write_text(diff)
+        (self.out / "description.md").write_text(str(final_message))
+
+        result = sandbox.replay(diff) if diff else ReplayResult(passed=False, report="The agent changed nothing.")
+        (self.out / "replay.json").write_text(result.model_dump_json(indent=2))
+        return result
+
+    @tool
+    def read_log(self, name: str, start_line: int, line_count: int) -> str:
+        """Return lines of one failed CI job log, at most 2000 per call.
+
+        Args:
+            name: A log file name from the <logs> list, e.g. "12345.log".
+            start_line: The first line to return, counting from 1.
+            line_count: How many lines to return.
+        """
+        lines = self.logs[name].read_text().splitlines()
+        start = max(start_line, 1) - 1
+        return "\n".join(lines[start:start + min(max(line_count, 0), _READ_LOG_MAX_LINES)])
+
+    def review(self) -> ReviewVerdict:
+        """Check the fix against the fixed rules, then have a new reviewer model check its diff and description.
+
+        Write pr.md only for a safe fix. The resolve GHA opens a PR only when pr.md exists.
+        """
+        replay = ReplayResult.model_validate_json((self.out / "replay.json").read_text())
+        diff, description = (self.out / "changes.diff").read_text(), (self.out / "description.md").read_text()
+
+        if not replay.passed:
+            verdict = ReviewVerdict(safe=False, findings=["The fix did not pass every failed CI job."])
+        elif not self._follows_rules(diff, description):
+            verdict = ReviewVerdict(safe=False, findings=["The diff breaks a fixed rule: scope, secrets, or hidden text."])
+        else:
+            logs = "\n".join(f"- `{log.name}`: {len(log.read_text().splitlines())} lines"
+                             for log in self.logs.values())
+            message = (f"<logs>\n{logs}\n</logs>\n\n<diff>\n{diff}\n</diff>\n\n"
+                       f"<description>\n{description}\n</description>")
+
+            verdict = self._run_agent(
+                (_PROMPTS / "review.md").read_text(),
+                message,
+                _TIMEOUT,
+                structured_output_model=ReviewVerdict,
+                tools=[self.read_log],
+            ).structured_output
+
+        (self.out / "review.json").write_text(verdict.model_dump_json(indent=2))
+        if verdict.safe:
+            run_url = "{GITHUB_SERVER_URL}/{GITHUB_REPOSITORY}/actions/runs/{GITHUB_RUN_ID}".format_map(os.environ)
+            bot = f"Generated by autofix with `{_MODEL}` at {datetime.now(UTC):%Y-%m-%d %H:%M} UTC in {run_url}."
+            (self.out / "pr.md").write_text(f"{description.strip()}\n\n{bot}\n\n{_LICENSE}\n")
+        return verdict
+
+    def _follows_rules(self, diff: str, description: str) -> bool:
+        """Return whether the diff edits only the runner and its .patch files, with no secrets or hidden text."""
+        if not diff:
+            return False
+        runner = self.target.runner
+        added = [line[1:] for line in diff.splitlines() if line.startswith("+")]
+        text = "\n".join([*added, description])
+        return (
+            all(path == runner or (path.suffix == ".patch" and path.is_relative_to(runner.parent))
+                for path in Git.changed_paths(diff))
+            and not any(pattern.search(text) for pattern in _SECRET_PATTERNS)
+            and not any(unicodedata.category(char) in _INVISIBLE_CATEGORIES and char not in "\t\n\r" for char in text)
+        )

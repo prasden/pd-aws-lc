@@ -482,7 +482,60 @@ jobs:
           path: integration-failure.txt
           if-no-files-found: ignore
 
+  e2e-integrations:
+    if: github.event_name == 'workflow_dispatch'
+    name: ${{ matrix.name }}-${{ matrix.arch }}
+    runs-on:
+      - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
+        image:${{ matrix.arch == 'x86_64' && 'linux-5.0' || matrix.arch == 'aarch64' && 'arm-3.0' }}
+        instance-size:${{ matrix.size }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: trousers
+            arch: x86_64
+            size: small
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_trousers_integration.sh
+          - name: librelp
+            arch: x86_64
+            size: small
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_librelp_integration.sh v1.13
+    steps:
+      - uses: actions/checkout@v7
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - uses: ./.github/actions/codebuild-docker-run
+        name: Run Container
+        id: integration-test
+        with:
+          image: ${{ steps.login-ecr.outputs.registry }}/aws-lc/${{ matrix.image }}
+          env: |
+            GITHUB_SHA
+          run: |
+            source /opt/compiler-env/setup-${{ matrix.compiler }}.sh
+            ${{ matrix.run }}
+      - name: Record job settings
+        if: always() && steps.integration-test.outcome == 'failure' && hashFiles('integration-failure.txt') != ''
+        env:
+          MATRIX: ${{ toJSON(matrix) }}
+          JOB_ID: ${{ job.check_run_id }}
+        run: |
+          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), env_vars: {}} + .' <<< "$MATRIX")" >> integration-failure.txt
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.integration-test.outcome == 'failure'
+        with:
+          name: integration-failure-${{ matrix.name }}-${{ matrix.arch }}
+          path: integration-failure.txt
+          if-no-files-found: ignore
+
   python:
+    if: github.event_name != 'workflow_dispatch'
     name: python-${{ matrix.version }}${{ matrix.buildFIPS == 1 && '-fips' || '' }}-${{ matrix.crtUseSystemCrypto == 1 && 'crt-vendored-crypto' || 'crt-system-crypto' }}-${{ matrix.arch }}
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}

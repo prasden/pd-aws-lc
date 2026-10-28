@@ -212,12 +212,14 @@ jobs:
           roleName: AwsLcGitHubActionsGetAutofixPatRole
       - uses: aws-actions/aws-secretsmanager-get-secrets@v2
         with:
-          secret-ids: PUSH_TOKEN,aws-lc/ci/autofix-push-token
+          secret-ids: |
+            PUSH_TOKEN,aws-lc/ci/autofix-push-token
+            APP_PRIVATE_KEY,acl-ci/credentials
       - uses: actions/create-github-app-token@v2
         id: pr-token
         with:
           app-id: ${{ vars.AUTOFIX_APP_ID }}
-          private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
+          private-key: ${{ env.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-pull-requests: write

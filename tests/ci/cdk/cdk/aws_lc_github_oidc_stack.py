@@ -383,4 +383,5 @@ def create_autofix_upload_role(scope: Construct, id: str,
 def create_get_autofix_pat_role(scope: Construct, id: str, principal: iam.IPrincipal) -> iam.Role:
     role = iam.Role(scope, id, role_name=id, assumed_by=iam.SessionTagsPrincipal(principal))
     sm.Secret.from_secret_name_v2(scope, "autofix-push-token", "aws-lc/ci/autofix-push-token").grant_read(role)
+    sm.Secret.from_secret_name_v2(scope, "acl-ci-credentials", "acl-ci/credentials").grant_read(role)
     return role

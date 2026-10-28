@@ -232,5 +232,5 @@ jobs:
           GH_TOKEN="$PUSH_TOKEN" gh auth setup-git
           GH_TOKEN="$PUSH_TOKEN" git -C aws-lc-fix -c core.hooksPath=/dev/null push -q \
             https://github.com/crypto-alg/aws-lc.git "+HEAD:refs/heads/$BRANCH"
-          GH_TOKEN="$PR_TOKEN" gh pr create --draft --repo "$GITHUB_REPOSITORY" --head "crypto-alg:$BRANCH" \
+          GH_TOKEN="$PR_TOKEN" gh pr create --draft --no-maintainer-edit --repo "$GITHUB_REPOSITORY" --head "crypto-alg:$BRANCH" \
             --title "$TITLE" --body-file autofix-work/out/pr.md

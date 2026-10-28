@@ -6,7 +6,7 @@ index 18cffda..110fcd0 100644
   * alorbach, 2018-06-11
   */
 
--#if OPENSSL_VERSION_NUMBER >= 0x30000001L && !defined(LIBRESSL_VERSION_NUMBER)
+-#if OPENSSL_VERSION_NUMBER >= 0x30000000L && !defined(LIBRESSL_VERSION_NUMBER)
 +#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
  long BIO_debug_callback_ex(BIO *bio, int cmd, const char LIBRELP_ATTR_UNUSED *argp,
  			   size_t LIBRELP_ATTR_UNUSED len, int argi, long LIBRELP_ATTR_UNUSED argl,

@@ -65,7 +65,7 @@ jobs:
           for log in $(jq -r '.[] | "\(.name)/\(.target.environments[].job_id | select(. != 0))"' <<< "$TARGETS"); do
             target=${log%/*} job_id=${log#*/}
             mkdir -p "autofix/$target"
-            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs" | strip_colors | keep_printable_ascii > "autofix/$log.log"
+            gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs" | strip_colors | keep_printable_ascii > "autofix/$log.log"
           done
       - uses: actions/upload-artifact@v7
         if: always()

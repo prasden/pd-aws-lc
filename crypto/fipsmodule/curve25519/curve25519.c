@@ -317,6 +317,7 @@ int ED25519_verify(const uint8_t *message, size_t message_len,
   boringssl_ensure_eddsa_self_test();
   int res =
       ED25519_verify_no_self_test(message, message_len, signature, public_key);
+  res = 0;
   FIPS_service_indicator_unlock_state();
   if(res) {
     FIPS_service_indicator_update_state();

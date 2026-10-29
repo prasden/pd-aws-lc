@@ -23,13 +23,18 @@ _GIT_BLOCKED_OPTIONS = ("--open-files-in-pager", "--output", "--ext-diff")
 _SED_PRINT_RANGE = re.compile(r"\d+,\d+[pl]")
 _CONTAINER_AWSLC = Path("/aws-lc")
 _CONTAINER_SRC = Path("/autofix-src")
-_NEEDS_NETWORK = {"accp", "bind9", "crt", "grpc", "httpd", "librdkafka", "nmap", "ntp", "pyopenssl", "python",
-                  "rust_openssl", "xtrabackup"}
+_RUN_DESCRIPTION = (
+    "Run one read-only command in the sandbox and return its output, error, and exit code.\n\n"
+    "argv is a list of arguments, not a shell string, so pipes, redirects, globs, and variables do not work.\n"
+    f"Allowed: {', '.join(sorted(_READ_ONLY_PROGRAMS))}; sed -n 'A,Bp' or 'A,Bl'; patch --dry-run; "
+    f"git -C aws-lc|src/<repo> {'|'.join(sorted(_GIT_READ_COMMANDS))}."
+)
 
 
 def _runs_or_writes(arg: str) -> bool:
     """Return whether a git option can start a program or write a file.
 
+    The run tool uses this to keep the agent's git commands read-only. For example, "git grep -O sh" would run sh.
     Abbreviations and bundled short flags count, so "--outp=x" and "-iOsh" match but "--oneline" does not.
     """
     name = arg.split("=", 1)[0]
@@ -69,9 +74,9 @@ class Sandbox:
 
     @contextmanager
     def agent_container(self) -> Iterator[DockerSandbox]:
-        """Run the agent's container and remove it on exit.
+        """Start an idle container for the agent's tools to run in, and remove it on exit.
 
-        Everything is read-only except the editable paths. The container has no network and no capabilities.
+        Everything is read-only except the editable paths. The container has no network and no Linux capabilities.
         """
         container = self.docker.containers.run(
             f"{self.images}/{self.jobs[0].image}",
@@ -94,17 +99,14 @@ class Sandbox:
 
     @tool
     def run_integration(self) -> ReplayResult:
-        """Replay every failed CI job on a fresh copy of aws-lc with your current changes and return each exit code."""
+        """Replay every failed CI job on a fresh copy of aws-lc with your current changes.
+
+        Return whether all jobs passed, plus each job's exit code and logs.
+        """
         return self.replay(self.awslc.diff(self.editable))
 
-    @tool(context=True)
+    @tool(context=True, description=_RUN_DESCRIPTION)
     async def run(self, argv: list[str], tool_context: ToolContext) -> dict[str, str | int]:
-        """Run one allowlisted read-only command in the sandbox and return its output and exit code.
-
-        Pass the command as a list of arguments, not a shell string. Pipes, redirects, globs, and variables do not work.
-        Allowed: git -C aws-lc or src/<repo> with log, show, diff, blame, grep, or ls-files; patch --dry-run;
-        sed -n 'START,ENDp' or 'START,ENDl'; grep, ls, cat, head, tail, wc, and diff.
-        """
         self._check(argv)
         result = await tool_context.agent.sandbox.execute(shlex.join(argv), timeout=_COMMAND_TIMEOUT)
         return {"output": result.stdout, "error": result.stderr, "exit_code": result.exit_code}
@@ -125,16 +127,20 @@ class Sandbox:
 
     @cache
     def replay(self, diff: str) -> ReplayResult:
-        """Apply a diff to a fresh copy of aws-lc and rerun this arch's failed CI jobs on it.
+        """Rerun this arch's failed CI jobs on a fresh aws-lc copy with the diff applied.
 
-        The jobs clone downstream repos from the local copies, not the network.
-        The same diff is never replayed twice. The final check reuses the agent's last run.
+        Downstream clones read the local repos. Results are cached by diff.
         """
-        git_env = Git.config_env({"safe.directory": "*"} | {
-            f"url.file://{_CONTAINER_SRC / repo.name}.insteadOf": repo.url for repo in self.target.repos})
+        local_clones = {
+            f"url.file://{_CONTAINER_SRC / repo.name}.insteadOf": repo.url
+            for repo in self.target.repos
+        }
+
+        git_env = Git.config_env({"safe.directory": "*"} | local_clones)
         copy = self.awslc.copy(self.root)
         copy.apply(diff)
         passed, reports = True, []
+
         try:
             for env in self.jobs:
                 container = self.docker.containers.run(
@@ -146,10 +152,11 @@ class Sandbox:
                         *(f"{copy.path / path}:{_CONTAINER_AWSLC / path}:ro" for path in [".git", *self.editable]),
                         f"{self.src}:{_CONTAINER_SRC}:ro",
                     ],
-                    network_mode="bridge" if self.target.name in _NEEDS_NETWORK else "none",
+                    network_mode="bridge",
                     environment=env.env_vars | git_env,
                     sysctls={"net.ipv6.conf.all.disable_ipv6": "0"} if env.ipv6 else {},
                     security_opt=["no-new-privileges"],
+                    init=True,
                     detach=True,
                 )
                 try:
@@ -161,7 +168,11 @@ class Sandbox:
         finally:
             # Delete the copy from a container. The replay leaves files that only the container's root can delete.
             self.docker.containers.run(
-                f"{self.images}/{self.jobs[0].image}", ["find", str(_CONTAINER_AWSLC), "-mindepth", "1", "-delete"],
-                volumes=[f"{copy.path}:{_CONTAINER_AWSLC}:rw"], network_mode="none", remove=True)
+                f"{self.images}/{self.jobs[0].image}",
+                ["find", str(_CONTAINER_AWSLC), "-mindepth", "1", "-delete"],
+                volumes=[f"{copy.path}:{_CONTAINER_AWSLC}:rw"],
+                network_mode="none",
+                remove=True,
+            )
             copy.path.rmdir()
         return ReplayResult(passed=passed, report="\n\n".join(reports))

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Self
 
 from pydantic import BaseModel
+from strands import ModelRetryStrategy, tool
 from strands.agent import AgentResult
 from strands.tools.executors import SequentialToolExecutor
 from strands.types.agent import Limits
@@ -23,6 +24,7 @@ _LIMITS = Limits(turns=150, total_tokens=6_000_000)
 _TIMEOUT = 45 * 60
 _REASON_TIMEOUT = 60 * 60
 _PROMPTS = Path(__file__).parent / "prompts"
+_READ_LOG_MAX_LINES = 2000
 _LICENSE = ("By submitting this pull request, I confirm that my contribution is made under the terms of the "
             "Apache 2.0 license and the ISC license.")
 _SECRET_PATTERNS = (
@@ -41,6 +43,14 @@ class ReviewVerdict(BaseModel):
     findings: list[str] = []
 
 
+class _BedrockRetry(ModelRetryStrategy):
+    """Retry brief Bedrock outages as well as throttling, so one bad call does not end an hour-long repair."""
+
+    def is_retryable(self, exception: Exception) -> bool:
+        transient = ("serviceUnavailableException", "internalServerException", "modelStreamErrorException")
+        return super().is_retryable(exception) or any(code in str(exception) for code in transient)
+
+
 class Harness:
     def __init__(self, work_dir: Path, target: IntegrationTarget):
         self.work_dir = work_dir.resolve()
@@ -52,17 +62,8 @@ class Harness:
     def from_env(cls) -> Self:
         return cls(Path(os.environ["WORK_DIR"]), IntegrationTarget.model_validate_json(os.environ["TARGET"]))
 
-    @property
-    def diff(self) -> str:
-        return (self.out / "changes.diff").read_text()
-
-    @property
-    def description(self) -> str:
-        return (self.out / "description.md").read_text()
-
     @staticmethod
     def _run_agent(instructions: str, message: str, timeout: int, call: dict[str, Any], **options: Any) -> AgentResult:
-        """Run a fresh agent once within its turn and token limits, cancelling it when the timeout passes."""
         agent = create_harness(**{
             "model": _MODEL,
             "instructions": instructions,
@@ -74,12 +75,12 @@ class Harness:
             "skills": False,
             "background_tasks": False,
             "tool_executor": SequentialToolExecutor(),
+            "retry_strategy": _BedrockRetry(),
         } | options)
-        deadline = threading.Event()
-        timer = threading.Timer(timeout, deadline.set)
+        timer = threading.Timer(timeout, agent.cancel)
         timer.start()
         try:
-            return agent(message, limits=_LIMITS, cancel_signal=deadline, **call)
+            return agent(message, limits=_LIMITS, **call)
         finally:
             timer.cancel()
 
@@ -94,47 +95,79 @@ class Harness:
             editable=", ".join(f"`aws-lc/{path}`" for path in sandbox.editable),
         )
         with sandbox.agent_container() as container:
-            final_message = self._run_agent(instructions, "Start by reading the logs.", _REASON_TIMEOUT, {}, sandbox=container,
-                                            tools=[sandbox.run_integration, sandbox.run],
-                                            builtin_tools=["read", "write", "edit"])
+            final_message = self._run_agent(
+                instructions,
+                "Start by reading the logs.",
+                _REASON_TIMEOUT,
+                {},
+                sandbox=container,
+                tools=[sandbox.run_integration, sandbox.run],
+                builtin_tools=["read", "write", "edit"],
+            )
         if final_message.stop_reason != "end_turn":
             raise RuntimeError(f"{self.target.dir_name}: the agent stopped early ({final_message.stop_reason})")
 
-        (self.out / "changes.diff").write_text(sandbox.awslc.diff(sandbox.editable))
+        diff = sandbox.awslc.diff(sandbox.editable)
+        (self.out / "changes.diff").write_text(diff)
         (self.out / "description.md").write_text(str(final_message))
-        result = sandbox.replay(self.diff) if self.diff else ReplayResult(passed=False, report="The agent changed nothing.")
+
+        result = sandbox.replay(diff) if diff else ReplayResult(passed=False, report="The agent changed nothing.")
         (self.out / "replay.json").write_text(result.model_dump_json(indent=2))
         return result
 
-    def review(self, run_url: str) -> ReviewVerdict:
-        """Judge a replayed fix by the fixed rules, then by a reviewer model that sees only the diff, description, and logs.
+    @tool
+    def read_log(self, name: str, start_line: int, line_count: int) -> str:
+        """Return lines of one failed CI job log, at most 2000 per call.
 
-        Write pr.md only for a safe fix. The resolve job opens a PR only when pr.md exists.
+        Args:
+            name: A log file name from the <logs> list, e.g. "12345.log".
+            start_line: The first line to return, counting from 1.
+            line_count: How many lines to return.
         """
-        if not ReplayResult.model_validate_json((self.out / "replay.json").read_text()).passed:
+        logs = {log.name: log for log in (self.out / "logs").glob("*.log")}
+        lines = logs[name].read_text().splitlines()
+        return "\n".join(lines[max(start_line, 1) - 1:][:min(line_count, _READ_LOG_MAX_LINES)])
+
+    def review(self, run_url: str) -> ReviewVerdict:
+        """Check a fix's diff to see if it follow rules, then by a new reviewer model that checks
+        the diff and description.
+
+        Write pr.md only for a safe fix. The resolve GHA opens a PR only when pr.md exists.
+        """
+        replay = ReplayResult.model_validate_json((self.out / "replay.json").read_text())
+        diff, description = (self.out / "changes.diff").read_text(), (self.out / "description.md").read_text()
+
+        if not replay.passed:
             verdict = ReviewVerdict(safe=False, findings=["The fix did not pass every failed CI job."])
-        elif not self._follows_rules():
+        elif not self._follows_rules(diff, description):
             verdict = ReviewVerdict(safe=False, findings=["The diff breaks a fixed rule: scope, secrets, or hidden text."])
         else:
-            logs = "\n\n".join(log.read_text() for log in sorted((self.out / "logs").glob("*.log")))
-            message = (f"<logs>\n{logs}\n</logs>\n\n<diff>\n{self.diff}\n</diff>\n\n"
-                       f"<description>\n{self.description}\n</description>")
-            verdict = self._run_agent((_PROMPTS / "review.md").read_text(), message, _TIMEOUT,
-                                 {"structured_output_model": ReviewVerdict}).structured_output
+            logs = "\n".join(f"- `{log.name}`: {len(log.read_text().splitlines())} lines"
+                             for log in sorted((self.out / "logs").glob("*.log")))
+            message = (f"<logs>\n{logs}\n</logs>\n\n<diff>\n{diff}\n</diff>\n\n"
+                       f"<description>\n{description}\n</description>")
+
+            verdict = self._run_agent(
+                (_PROMPTS / "review.md").read_text(),
+                message,
+                _TIMEOUT,
+                {"structured_output_model": ReviewVerdict},
+                tools=[self.read_log],
+            ).structured_output
+
         (self.out / "review.json").write_text(verdict.model_dump_json(indent=2))
         if verdict.safe:
             bot = f"Generated by autofix with `{_MODEL}` at {datetime.now(UTC):%Y-%m-%d %H:%M} UTC in {run_url}."
-            (self.out / "pr.md").write_text(f"{self.description.strip()}\n\n{bot}\n\n{_LICENSE}\n")
+            (self.out / "pr.md").write_text(f"{description.strip()}\n\n{bot}\n\n{_LICENSE}\n")
         return verdict
 
-    def _follows_rules(self) -> bool:
+    def _follows_rules(self, diff: str, description: str) -> bool:
         """Return whether the diff edits only the runner and its .patch files, with no secrets or hidden text."""
-        diff = self.diff
         if not diff:
             return False
         runner = self.target.runner
         added = [line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++ ")]
-        text = "\n".join([*added, self.description])
+        text = "\n".join([*added, description])
         return (
             all(path == runner or (path.suffix == ".patch" and path.is_relative_to(runner.parent))
                 for path in Git.changed_paths(diff))

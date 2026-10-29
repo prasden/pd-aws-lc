@@ -84,11 +84,11 @@ jobs:
       max-parallel: 5
       matrix:
         include: ${{ fromJSON(needs.get-failing-integrations.outputs.targets) }}
-    # Run on a CodeBuild image with the same arch as the failed job.
+    # Run on a CodeBuild image with the same arch and size as the failed job.
     runs-on: &codebuild
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
         image:${{ matrix.arch == 'aarch64' && 'arm-3.0' || 'linux-5.0' }}
-        instance-size:small
+        instance-size:${{ matrix.size }}
     permissions:
       contents: read
       id-token: write

@@ -15,6 +15,7 @@ class Environment(BaseModel, frozen=True):
     image: str = Field(pattern=_SHELL_SAFE)
     compiler: str = Field(pattern=_SHELL_SAFE)
     arch: Literal["x86_64", "aarch64"]
+    size: str = Field("small", pattern=_SHELL_SAFE)
     job_id: int = 0
     user: str = Field("", pattern=_SHELL_SAFE)
     ipv6: bool = False
@@ -51,7 +52,9 @@ class IntegrationTarget(BaseModel):
         run = f"./{self.runner} {shlex.quote(self.version)}"
         script = f"aws() {{ :; }}; export -f aws; [ -f {setup} ] && source {setup}; {run}"
         if env.user:
+            script = f'export HOME=/home/{env.user} PATH="$CONTAINER_PATH"; {script}'
             script = (f"mkdir -p /home/{env.user}; chown -R {env.user} /home/{env.user} . 2>/dev/null; "
+                      f"git config --system --add safe.directory '*'; export CONTAINER_PATH=\"$PATH\"; "
                       f"su -p {env.user} -c {shlex.quote(script)}")
         return script
 
@@ -69,11 +72,23 @@ def recognize(reports: Path, awslc: Repo) -> list[dict]:
             name, version = head.split("\t")
             repos = [Repo(*line.removeprefix("commit=").split()) for line in lines if line.startswith("commit=")]
             env = Environment.model_validate_json(lines[-1].removeprefix("job="))
-            target = targets.setdefault((name, version), IntegrationTarget(
-                name=name, version=version, awslc=awslc, repos=repos, environments=[]))
+            target = targets.setdefault(
+                (name, version),
+                IntegrationTarget(
+                    name=name,
+                    version=version,
+                    awslc=awslc,
+                    repos=repos,
+                    environments=[],
+                ),
+            )
         except (ValueError, IndexError) as error:
             logging.warning("skipping a bad integration-failure.txt: %s", error)
             continue
         target.environments.append(env)
-    return [{"name": target.dir_name, "arch": "x86_64" if target.on("x86_64") else "aarch64",
-             "target": target.model_dump(mode="json")} for target in targets.values()]
+    matrix = []
+    for target in targets.values():
+        arch = "x86_64" if target.on("x86_64") else "aarch64"
+        matrix.append({"name": target.dir_name, "arch": arch, "size": target.on(arch)[0].size,
+                       "target": target.model_dump(mode="json")})
+    return matrix

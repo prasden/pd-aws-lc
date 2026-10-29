@@ -6,6 +6,12 @@ set -exu
 
 source tests/ci/common_posix_setup.sh
 
+# LMDB is a required bind9 dependency since upstream removed NZF support.
+if [ "$(id -u)" -eq 0 ]; then
+  apt-get update
+  apt-get install -y --no-install-recommends liblmdb-dev
+fi
+
 # Set up environment.
 
 python3 -m pip install --upgrade meson

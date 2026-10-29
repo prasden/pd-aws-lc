@@ -199,6 +199,16 @@ DECLARE_ASN1_ITEM(GENERAL_NAME)
 // and C type is |GENERAL_NAMES*|, aka |STACK_OF(GENERAL_NAME)*|.
 DECLARE_ASN1_ITEM(GENERAL_NAMES)
 
+// Certificate policy |ASN1_ITEM|s (RFC 5280 certificatePolicies). These are
+// declared here rather than in the defining translation unit (v3_cpols.c) so
+// the symbol-registry tooling, which scans headers, records their exported
+// |name_it| symbols. The corresponding public |_new|/|_free| functions live in
+// <openssl/x509.h>.
+DECLARE_ASN1_ITEM(POLICYINFO)
+DECLARE_ASN1_ITEM(POLICYQUALINFO)
+DECLARE_ASN1_ITEM(USERNOTICE)
+DECLARE_ASN1_ITEM(NOTICEREF)
+
 struct X509_VERIFY_PARAM_st {
   int64_t check_time;               // POSIX time to use
   unsigned long flags;              // Various verify flags
@@ -519,9 +529,6 @@ GENERAL_NAMES *v2i_GENERAL_NAMES(const X509V3_EXT_METHOD *method,
 // |X509_NAME| issue is resolved.
 int X509_check_akid(X509 *issuer, const AUTHORITY_KEYID *akid);
 
-// TODO(https://crbug.com/boringssl/695): Remove this.
-int DIST_POINT_set_dpname(DIST_POINT_NAME *dpn, X509_NAME *iname);
-
 // Exported for testing purposes only. Used for validating that the CIDR mask bytes
 // from a IP Name Constraint is a valid CIDR prefix.
 //
@@ -532,6 +539,8 @@ int DIST_POINT_set_dpname(DIST_POINT_NAME *dpn, X509_NAME *iname);
 OPENSSL_EXPORT int validate_cidr_mask(CBS *cidr_mask);
 
 OPENSSL_EXPORT int cn2dnsid(ASN1_STRING *cn, unsigned char **dnsid, size_t *idlen);
+
+int x509_digest_nid_ok(const int digest_nid);
 
 // Match reference identifiers starting with "." to any sub-domain.
 // This is a non-public flag, turned on implicitly when the subject

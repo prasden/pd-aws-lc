@@ -359,10 +359,11 @@ static int mod_exp(BIGNUM *r0, const BIGNUM *I, RSA *rsa, BN_CTX *ctx);
 int rsa_verify_raw_no_self_test(RSA *rsa, size_t *out_len, uint8_t *out,
                                 size_t max_out, const uint8_t *in,
                                 size_t in_len, int padding) {
+  *out_len = 0;
+
   if(rsa->meth && rsa->meth->verify_raw) {
-    if (max_out > INT_MAX) {
+    if (in_len > INT_MAX) {
       OPENSSL_PUT_ERROR(RSA, ERR_R_OVERFLOW);
-      *out_len = 0;
       return 0;
     }
     // In OpenSSL, the RSA_METHOD |verify_raw| or |pub_dec| operation does
@@ -372,9 +373,8 @@ int rsa_verify_raw_no_self_test(RSA *rsa, size_t *out_len, uint8_t *out,
     // and expect an |out_len| parameter. To remain compatible with this new
     // paradigm and OpenSSL, we initialize |out_len| based on the return value
     // here.
-    int ret = rsa->meth->verify_raw((int)max_out, in, out, rsa, padding);
+    int ret = rsa->meth->verify_raw((int)in_len, in, out, rsa, padding);
     if(ret < 0) {
-      *out_len = 0;
       return 0;
     }
     *out_len = ret;

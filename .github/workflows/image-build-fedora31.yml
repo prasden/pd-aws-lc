@@ -35,7 +35,7 @@ jobs:
     outputs:
       fedora31: ${{ steps.images.outputs.fedora31 }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
@@ -48,8 +48,8 @@ jobs:
         run: |
           echo fedora31=${{ steps.ecr.outputs.staging_url }}:$(uuidgen) >> "$GITHUB_OUTPUT"
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+        uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
         with:
           file: ./.github/docker_images/aws-lc/fedora/Dockerfile.31
           context: ./.github/docker_images/aws-lc/fedora
@@ -65,6 +65,9 @@ jobs:
             ./.github/docker_images/scripts/verify-go-version.sh 1.25
             ./.github/docker_images/scripts/verify-cmake-version.sh cmake 3.17
             ./.github/docker_images/scripts/verify-perl-version.sh 5.30
+            ./.github/docker_images/scripts/verify-rust-version.sh rustc
+            ./.github/docker_images/scripts/verify-rust-version.sh cargo
+            ./.github/docker_images/scripts/verify-rust-version.sh rustfmt
             # Check Default GCC Compilers
             source /opt/compiler-env/setup-gcc.sh
             ./.github/docker_images/scripts/verify-compiler-version.sh $CC gcc 9.3

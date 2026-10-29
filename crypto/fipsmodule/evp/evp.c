@@ -19,6 +19,7 @@
 #include "../../pem/internal.h"
 #include "../../console/internal.h"
 #include "../../internal.h"
+#include "../kem/internal.h"
 #include "../pqdsa/internal.h"
 #include "internal.h"
 
@@ -183,7 +184,11 @@ err:
 int EVP_PKEY_copy_parameters(EVP_PKEY *to, const EVP_PKEY *from) {
   SET_DIT_AUTO_RESET;
   if (to->type == EVP_PKEY_NONE) {
-    evp_pkey_set_method(to, from->ameth);
+    // TODO(crbug.com/42290409): This shouldn't leave |to| in a half-empty state
+    // on error. The complexity here largely comes from parameterless DSA keys,
+    // which we no longer support, so this function can probably be trimmed
+    // down.
+    evp_pkey_set0(to, from->ameth, NULL);
   } else if (to->type != from->type) {
     OPENSSL_PUT_ERROR(EVP, EVP_R_DIFFERENT_KEY_TYPES);
     return 0;
@@ -253,6 +258,19 @@ int EVP_PKEY_pqdsa_get_type(const EVP_PKEY *pkey) {
   return pkey->pkey.pqdsa_key->pqdsa->nid;
 }
 
+int EVP_PKEY_kem_get_type(const EVP_PKEY *pkey) {
+  SET_DIT_AUTO_RESET;
+  if (pkey->type != EVP_PKEY_KEM) {
+    OPENSSL_PUT_ERROR(EVP, EVP_R_EXPECTING_A_KEM_KEY);
+    return 0;
+  }
+  if (!pkey->pkey.kem_key || !pkey->pkey.kem_key->kem) {
+    OPENSSL_PUT_ERROR(EVP, EVP_R_NO_PARAMETERS_SET);
+    return 0;
+  }
+  return pkey->pkey.kem_key->kem->nid;
+}
+
 int EVP_MD_get_pkey_type(const EVP_MD *md) {
   if (md) {
     int sig_nid = 0;
@@ -293,10 +311,12 @@ static const EVP_PKEY_ASN1_METHOD *evp_pkey_asn1_find(int nid) {
   return NULL;
 }
 
-void evp_pkey_set_method(EVP_PKEY *pkey, const EVP_PKEY_ASN1_METHOD *method) {
+void evp_pkey_set0(EVP_PKEY *pkey, const EVP_PKEY_ASN1_METHOD *method,
+                   void *pkey_data) {
   free_it(pkey);
   pkey->ameth = method;
-  pkey->type = pkey->ameth->pkey_id;
+  pkey->type = method ? method->pkey_id : EVP_PKEY_NONE;
+  pkey->pkey.ptr = pkey_data;
 }
 
 static int pkey_set_type(EVP_PKEY *pkey, int type, const char *str, int len) {
@@ -304,7 +324,7 @@ static int pkey_set_type(EVP_PKEY *pkey, int type, const char *str, int len) {
     // This isn't strictly necessary, but historically |EVP_PKEY_set_type| would
     // clear |pkey| even if |evp_pkey_asn1_find| failed, so we preserve that
     // behavior.
-    free_it(pkey);
+    evp_pkey_set0(pkey, NULL, NULL);
   }
 
   const EVP_PKEY_ASN1_METHOD *ameth = NULL;
@@ -322,7 +342,7 @@ static int pkey_set_type(EVP_PKEY *pkey, int type, const char *str, int len) {
   }
 
   if (pkey) {
-    evp_pkey_set_method(pkey, ameth);
+    evp_pkey_set0(pkey, ameth, NULL);
   }
 
   return 1;
@@ -388,11 +408,13 @@ int EVP_PKEY_set1_RSA(EVP_PKEY *pkey, RSA *key) {
 
 int EVP_PKEY_assign_RSA(EVP_PKEY *pkey, RSA *key) {
   SET_DIT_AUTO_RESET;
+  if (key == NULL) {
+    return 0;
+  }
   const EVP_PKEY_ASN1_METHOD *meth = evp_pkey_asn1_find(EVP_PKEY_RSA);
   assert(meth != NULL);
-  evp_pkey_set_method(pkey, meth);
-  pkey->pkey.ptr = key;
-  return key != NULL;
+  evp_pkey_set0(pkey, meth, key);
+  return 1;
 }
 
 RSA *EVP_PKEY_get0_RSA(const EVP_PKEY *pkey) {
@@ -424,11 +446,13 @@ int EVP_PKEY_set1_DSA(EVP_PKEY *pkey, DSA *key) {
 
 int EVP_PKEY_assign_DSA(EVP_PKEY *pkey, DSA *key) {
   SET_DIT_AUTO_RESET;
+  if (key == NULL) {
+    return 0;
+  }
   const EVP_PKEY_ASN1_METHOD *meth = evp_pkey_asn1_find(EVP_PKEY_DSA);
   assert(meth != NULL);
-  evp_pkey_set_method(pkey, meth);
-  pkey->pkey.ptr = key;
-  return key != NULL;
+  evp_pkey_set0(pkey, meth, key);
+  return 1;
 }
 
 DSA *EVP_PKEY_get0_DSA(const EVP_PKEY *pkey) {
@@ -460,11 +484,13 @@ int EVP_PKEY_set1_EC_KEY(EVP_PKEY *pkey, EC_KEY *key) {
 
 int EVP_PKEY_assign_EC_KEY(EVP_PKEY *pkey, EC_KEY *key) {
   SET_DIT_AUTO_RESET;
+  if (key == NULL) {
+    return 0;
+  }
   const EVP_PKEY_ASN1_METHOD *meth = evp_pkey_asn1_find(EVP_PKEY_EC);
   assert(meth != NULL);
-  evp_pkey_set_method(pkey, meth);
-  pkey->pkey.ptr = key;
-  return key != NULL;
+  evp_pkey_set0(pkey, meth, key);
+  return 1;
 }
 
 EC_KEY *EVP_PKEY_get0_EC_KEY(const EVP_PKEY *pkey) {
@@ -546,9 +572,9 @@ EVP_PKEY *EVP_PKEY_new_raw_private_key(int type, ENGINE *unused,
   if (ret == NULL) {
     goto err;
   }
-  evp_pkey_set_method(ret, method);
+  evp_pkey_set0(ret, method, NULL);
 
-  if (!ret->ameth->set_priv_raw(ret, in, len, NULL, 0)) {
+  if (!method->set_priv_raw(ret, in, len, NULL, 0)) {
     goto err;
   }
 
@@ -583,9 +609,9 @@ EVP_PKEY *EVP_PKEY_new_raw_public_key(int type, ENGINE *unused,
   if (ret == NULL) {
     goto err;
   }
-  evp_pkey_set_method(ret, method);
+  evp_pkey_set0(ret, method, NULL);
 
-  if (!ret->ameth->set_pub_raw(ret, in, len)) {
+  if (!method->set_pub_raw(ret, in, len)) {
     goto err;
   }
 
@@ -644,15 +670,21 @@ int EVP_PKEY_CTX_set_signature_md(EVP_PKEY_CTX *ctx, const EVP_MD *md) {
 int EVP_PKEY_CTX_get_signature_md(EVP_PKEY_CTX *ctx, const EVP_MD **out_md) {
   SET_DIT_AUTO_RESET;
   return EVP_PKEY_CTX_ctrl(ctx, -1, EVP_PKEY_OP_TYPE_SIG, EVP_PKEY_CTRL_GET_MD,
-                           0, (void *)out_md);
+                           0, (void *)out_md) > 0;
+}
+
+int EVP_PKEY_CTX_set1_signature_context_string(EVP_PKEY_CTX *ctx,
+                                       const uint8_t *context,
+                                       size_t context_len) {
+  EVP_PKEY_CTX_SIGNATURE_CONTEXT_PARAMS params = {context, context_len};
+  return EVP_PKEY_CTX_ctrl(ctx, -1, EVP_PKEY_OP_TYPE_SIG,
+                           EVP_PKEY_CTRL_SIGNING_CONTEXT, 0, &params) > 0;
 }
 
 int EVP_PKEY_CTX_set_signature_context(EVP_PKEY_CTX *ctx,
                                        const uint8_t *context,
                                        size_t context_len) {
-  EVP_PKEY_CTX_SIGNATURE_CONTEXT_PARAMS params = {context, context_len};
-  return EVP_PKEY_CTX_ctrl(ctx, -1, EVP_PKEY_OP_TYPE_SIG,
-                           EVP_PKEY_CTRL_SIGNING_CONTEXT, 0, &params);
+  return EVP_PKEY_CTX_set1_signature_context_string(ctx, context, context_len);
 }
 
 int EVP_PKEY_CTX_get0_signature_context(EVP_PKEY_CTX *ctx,
@@ -661,8 +693,8 @@ int EVP_PKEY_CTX_get0_signature_context(EVP_PKEY_CTX *ctx,
   GUARD_PTR(context);
   GUARD_PTR(context_len);
   EVP_PKEY_CTX_SIGNATURE_CONTEXT_PARAMS params = {NULL, 0};
-  if (!EVP_PKEY_CTX_ctrl(ctx, -1, EVP_PKEY_OP_TYPE_SIG,
-                         EVP_PKEY_CTRL_GET_SIGNING_CONTEXT, 0, &params)) {
+  if (EVP_PKEY_CTX_ctrl(ctx, -1, EVP_PKEY_OP_TYPE_SIG,
+                        EVP_PKEY_CTRL_GET_SIGNING_CONTEXT, 0, &params) <= 0) {
     return 0;
   }
   *context = params.context;
@@ -725,7 +757,13 @@ static int evp_pkey_tls_encodedpoint_ec_curve_supported(const EC_KEY *ec_key) {
   if ((NID_secp224r1 != curve_nid) &&
       (NID_X9_62_prime256v1 != curve_nid) &&
       (NID_secp384r1 != curve_nid) &&
-      (NID_secp521r1 != curve_nid)) {
+      (NID_secp521r1 != curve_nid) &&
+      (NID_secp256k1 != curve_nid) &&
+      (NID_brainpoolP224r1 != curve_nid) &&
+      (NID_brainpoolP256r1 != curve_nid) &&
+      (NID_brainpoolP320r1 != curve_nid) &&
+      (NID_brainpoolP384r1 != curve_nid) &&
+      (NID_brainpoolP512r1 != curve_nid)) {
     OPENSSL_PUT_ERROR(EVP, EVP_R_UNSUPPORTED_PUBLIC_KEY_TYPE);
     goto err;
   }

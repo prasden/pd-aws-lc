@@ -75,26 +75,6 @@ static bssl::UniquePtr<EC_KEY> ECDSAFromPEM(const char *pem) {
       PEM_read_bio_ECPrivateKey(bio.get(), nullptr, nullptr, nullptr));
 }
 
-static bssl::UniquePtr<STACK_OF(X509)> CertChainFromPEM(const char *pem) {
-  bssl::UniquePtr<STACK_OF(X509)> stack(sk_X509_new_null());
-  if (!stack) {
-    return nullptr;
-  }
-
-  bssl::UniquePtr<BIO> bio(BIO_new_mem_buf(pem, strlen(pem)));
-  for (;;) {
-    bssl::UniquePtr<X509> cert = bssl::UniquePtr<X509>(
-        PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr));
-    if (cert == nullptr) {
-      break;
-    }
-    if (!bssl::PushToStack(stack.get(), bssl::UpRef(cert.get()))) {
-      return nullptr;
-    }
-  }
-  return stack;
-}
-
 static bssl::UniquePtr<OCSP_RESPONSE> LoadOCSP_RESPONSE(
     bssl::Span<const uint8_t> der) {
   const uint8_t *ptr = der.data();
@@ -1293,6 +1273,38 @@ TEST(OCSPResponseSignTestExtended, OCSPResponseSign) {
                               pkey.get(), EVP_sha256(), additional_cert.get(),
                               OCSP_NOCERTS));
   EXPECT_EQ((int)sk_X509_num(basic_response.get()->certs), 0);
+
+  // Regression: re-signing the same |OCSP_BASICRESP| through any sequence of
+  // |OCSP_RESPID_KEY| flag combinations must not leak or free the prior
+  // responderId union arm through the wrong destructor. ASAN should flag any
+  // misuse.
+  basic_response.reset(OCSP_BASICRESP_new());
+  ASSERT_TRUE(basic_response);
+  EXPECT_TRUE(OCSP_basic_sign(basic_response.get(), signer_cert.get(),
+                              pkey.get(), EVP_sha256(), additional_cert.get(),
+                              0));
+  EXPECT_EQ(basic_response.get()->tbsResponseData->responderId->type,
+            V_OCSP_RESPID_NAME);
+  EXPECT_TRUE(OCSP_basic_sign(basic_response.get(), signer_cert.get(),
+                              pkey.get(), EVP_sha256(), additional_cert.get(),
+                              OCSP_RESPID_KEY));
+  EXPECT_EQ(basic_response.get()->tbsResponseData->responderId->type,
+            V_OCSP_RESPID_KEY);
+  EXPECT_TRUE(OCSP_basic_sign(basic_response.get(), signer_cert.get(),
+                              pkey.get(), EVP_sha256(), additional_cert.get(),
+                              OCSP_RESPID_KEY));
+  EXPECT_EQ(basic_response.get()->tbsResponseData->responderId->type,
+            V_OCSP_RESPID_KEY);
+  EXPECT_TRUE(OCSP_basic_sign(basic_response.get(), signer_cert.get(),
+                              pkey.get(), EVP_sha256(), additional_cert.get(),
+                              0));
+  EXPECT_EQ(basic_response.get()->tbsResponseData->responderId->type,
+            V_OCSP_RESPID_NAME);
+  EXPECT_TRUE(OCSP_basic_sign(basic_response.get(), signer_cert.get(),
+                              pkey.get(), EVP_sha256(), additional_cert.get(),
+                              0));
+  EXPECT_EQ(basic_response.get()->tbsResponseData->responderId->type,
+            V_OCSP_RESPID_NAME);
 }
 
 static const char extended_good_http_request_hdr[] =
@@ -1331,6 +1343,65 @@ TEST(OCSPRequestTest, AddHeader) {
       std::string(reinterpret_cast<const char *>(out),
                   sizeof(extended_good_http_request_hdr) +
                       std::to_string(ocsp_request_data.size()).size() + 1));
+}
+
+struct OCSPRequestHeaderTestVector {
+  const char *method;
+  const char *path;
+  const char *name;
+  const char *value;
+  int expected_reason;
+};
+
+static const OCSPRequestHeaderTestVector kOCSPRequestHeaderVectors[] = {
+    {"POST", "/ocsp", "Host", "ocsp.example.com", 0},
+    // A NULL path defaults to "/".
+    {"POST", nullptr, "Host", "ocsp.example.com", 0},
+    // A NULL value writes the header name only.
+    {"POST", "/ocsp", "Host", nullptr, 0},
+    {nullptr, "/ocsp", "Host", "ocsp.example.com", ERR_R_PASSED_NULL_PARAMETER},
+    // CR or LF would end the request line early.
+    {"POST", "/ocsp\r\nX-Evil: 1", "Host", "ocsp.example.com",
+     OCSP_R_INVALID_HTTP_HEADER},
+    {"POST", "/ocsp\r", "Host", "ocsp.example.com", OCSP_R_INVALID_HTTP_HEADER},
+    {"POST", "/ocsp\n", "Host", "ocsp.example.com", OCSP_R_INVALID_HTTP_HEADER},
+    {"POST\r\n", "/ocsp", "Host", "ocsp.example.com",
+     OCSP_R_INVALID_HTTP_HEADER},
+    // CR or LF would end the header line early.
+    {"POST", "/ocsp", "Host", "ocsp.example.com\r\nX-Evil: 1",
+     OCSP_R_INVALID_HTTP_HEADER},
+    {"POST", "/ocsp", "Host", "ocsp.example.com\r", OCSP_R_INVALID_HTTP_HEADER},
+    {"POST", "/ocsp", "Host", "ocsp.example.com\n", OCSP_R_INVALID_HTTP_HEADER},
+    {"POST", "/ocsp", "Host\r\nX-Evil", "1", OCSP_R_INVALID_HTTP_HEADER},
+};
+
+class OCSPRequestHeaderTest
+    : public testing::TestWithParam<OCSPRequestHeaderTestVector> {};
+
+INSTANTIATE_TEST_SUITE_P(All, OCSPRequestHeaderTest,
+                         testing::ValuesIn(kOCSPRequestHeaderVectors));
+
+TEST_P(OCSPRequestHeaderTest, OCSPRequestHeader) {
+  const OCSPRequestHeaderTestVector &t = GetParam();
+
+  bssl::UniquePtr<BIO> bio(BIO_new(BIO_s_mem()));
+  bssl::UniquePtr<OCSP_REQ_CTX> ocspReqCtx(OCSP_REQ_CTX_new(bio.get(), 0));
+  ASSERT_TRUE(ocspReqCtx);
+
+  BIO *mem = OCSP_REQ_CTX_get0_mem_bio(ocspReqCtx.get());
+  size_t written = 0;
+
+  ERR_clear_error();
+  bool ok = OCSP_REQ_CTX_http(ocspReqCtx.get(), t.method, t.path);
+  if (ok) {
+    written = BIO_pending(mem);
+    ok = OCSP_REQ_CTX_add1_header(ocspReqCtx.get(), t.name, t.value);
+  }
+  EXPECT_EQ(t.expected_reason == 0, ok);
+  EXPECT_EQ(t.expected_reason, ERR_GET_REASON(ERR_get_error()));
+  if (!ok) {
+    EXPECT_EQ(written, BIO_pending(mem));
+  }
 }
 
 // Check a |OCSP_CERTID| can be added to an |OCSP_REQUEST| with
@@ -1604,6 +1675,13 @@ static const OCSPURLTestVector kOCSPURLVectors[] = {
     // No closing bracket for ipv6.
     {"http://[2001:db8::1/", nullptr, nullptr, nullptr, 0,
      OCSP_URL_PARSE_ERROR},
+    // Protocol must match exactly, not just as a prefix.
+    {"https1://ocsp.example.com/", nullptr, nullptr, nullptr, 0,
+     OCSP_URL_PARSE_ERROR},
+    {"httpss://ocsp.example.com/", nullptr, nullptr, nullptr, 0,
+     OCSP_URL_PARSE_ERROR},
+    {"httpe://ocsp.example.com/path", nullptr, nullptr, nullptr, 0,
+     OCSP_URL_PARSE_ERROR},
 };
 
 class OCSPURLTest : public testing::TestWithParam<OCSPURLTestVector> {};
@@ -1632,6 +1710,7 @@ TEST_P(OCSPURLTest, OCSPParseURL) {
     EXPECT_FALSE(host);
     EXPECT_FALSE(port);
     EXPECT_FALSE(path);
+    EXPECT_EQ(is_ssl, 0);
   }
 }
 
@@ -1933,6 +2012,51 @@ TEST(OCSPTest, OCSPResponsePrint) {
   }
 }
 
+// Verify that malformed OCSP responder IDs cannot be encoded into an
+// |OCSP_RESPONSE|.
+TEST(OCSPTest, OCSPResponsePrintMalformedResponderId) {
+  // A default-initialized |OCSP_RESPID| (ASN1_CHOICE) has type -1, indicating
+  // no alternative has been selected.
+  bssl::UniquePtr<OCSP_BASICRESP> br(OCSP_BASICRESP_new());
+  ASSERT_TRUE(br);
+  OCSP_RESPID *rid = br->tbsResponseData->responderId;
+  EXPECT_EQ(rid->type, -1);
+  EXPECT_EQ(rid->value.byName, nullptr);
+
+  // The ASN.1 encoder rejects an |OCSP_BASICRESP| with an uninitialized
+  // responderId choice.
+  EXPECT_FALSE(
+      OCSP_response_create(OCSP_RESPONSE_STATUS_SUCCESSFUL, br.get()));
+
+  // Set type to |V_OCSP_RESPID_KEY| without providing a key. The encoder
+  // rejects this.
+  br.reset(OCSP_BASICRESP_new());
+  ASSERT_TRUE(br);
+  rid = br->tbsResponseData->responderId;
+  rid->type = V_OCSP_RESPID_KEY;
+  EXPECT_EQ(rid->value.byKey, nullptr);
+  EXPECT_FALSE(
+      OCSP_response_create(OCSP_RESPONSE_STATUS_SUCCESSFUL, br.get()));
+
+  // Set type to |V_OCSP_RESPID_NAME| without providing a name. The encoder
+  // rejects this.
+  br.reset(OCSP_BASICRESP_new());
+  ASSERT_TRUE(br);
+  rid = br->tbsResponseData->responderId;
+  rid->type = V_OCSP_RESPID_NAME;
+  EXPECT_EQ(rid->value.byName, nullptr);
+  EXPECT_FALSE(
+      OCSP_response_create(OCSP_RESPONSE_STATUS_SUCCESSFUL, br.get()));
+
+  // Set an unrecognized type. The encoder rejects this.
+  br.reset(OCSP_BASICRESP_new());
+  ASSERT_TRUE(br);
+  rid = br->tbsResponseData->responderId;
+  rid->type = 42;
+  EXPECT_FALSE(
+      OCSP_response_create(OCSP_RESPONSE_STATUS_SUCCESSFUL, br.get()));
+}
+
 TEST(OCSPTest, OCSPRequestPrint) {
   static const std::array<std::string, 11> kExpected{
       {"OCSP Request Data:", "    Version: 1 (0x0)", "    Requestor List:",
@@ -2008,4 +2132,304 @@ TEST(OCSPTest, OCSP_SINGLERESP) {
   ASSERT_EQ(ASN1_OCTET_STRING_cmp(X509_EXTENSION_get_data(retrieved_ext),
                                   X509_EXTENSION_get_data(ext.get())),
             0);
+}
+
+// Helper to create an OCSP responder cert issued by |ca_cert|/|ca_key|, with
+// EKU=OCSP Signing. If |add_nocheck| is true, the id-pkix-ocsp-nocheck
+// extension is added.
+static bssl::UniquePtr<X509> MakeOCSPResponderCert(EVP_PKEY *responder_key,
+                                                   X509 *ca_cert,
+                                                   EVP_PKEY *ca_key,
+                                                   bool add_nocheck) {
+  bssl::UniquePtr<X509> cert(X509_new());
+  if (!cert ||
+      !X509_set_version(cert.get(), X509_VERSION_3) ||
+      !ASN1_INTEGER_set(X509_get_serialNumber(cert.get()), 1) ||
+      !X509_set_issuer_name(cert.get(), X509_get_subject_name(ca_cert)) ||
+      !X509_NAME_add_entry_by_txt(
+          X509_get_subject_name(cert.get()), "CN", MBSTRING_UTF8,
+          reinterpret_cast<const uint8_t *>("OCSP Responder"), -1, -1, 0) ||
+      !X509_set_pubkey(cert.get(), responder_key) ||
+      !ASN1_TIME_adj(X509_getm_notBefore(cert.get()), kReferenceTime, -1, 0) ||
+      !ASN1_TIME_adj(X509_getm_notAfter(cert.get()), kReferenceTime, 1, 0)) {
+    return nullptr;
+  }
+
+  // Add EKU: OCSP Signing (required for delegated responder).
+  bssl::UniquePtr<STACK_OF(ASN1_OBJECT)> eku(sk_ASN1_OBJECT_new_null());
+  if (!eku || !sk_ASN1_OBJECT_push(eku.get(), OBJ_nid2obj(NID_OCSP_sign)) ||
+      !X509_add1_ext_i2d(cert.get(), NID_ext_key_usage, eku.get(),
+                         /*crit=*/1, /*flags=*/0)) {
+    return nullptr;
+  }
+
+  if (add_nocheck) {
+    ASN1_NULL *null_val = ASN1_NULL_new();
+    if (null_val == NULL ||
+        !X509_add1_ext_i2d(cert.get(), NID_id_pkix_OCSP_noCheck, null_val,
+                           /*crit=*/0, /*flags=*/0)) {
+      ASN1_NULL_free(null_val);
+      return nullptr;
+    }
+    ASN1_NULL_free(null_val);
+  }
+
+  if (!X509_sign(cert.get(), ca_key, EVP_sha256())) {
+    return nullptr;
+  }
+  return cert;
+}
+
+// Helper to create a CRL issued by |issuer|. If |revoked_serial| is non-NULL,
+// the CRL lists that serial number as revoked.
+static bssl::UniquePtr<X509_CRL> MakeTestCRL(X509 *issuer, EVP_PKEY *issuer_key,
+                                             const ASN1_INTEGER *revoked_serial) {
+  bssl::UniquePtr<X509_CRL> crl(X509_CRL_new());
+  bssl::UniquePtr<ASN1_TIME> last_update(
+      ASN1_TIME_adj(nullptr, kReferenceTime, -1, 0));
+  bssl::UniquePtr<ASN1_TIME> next_update(
+      ASN1_TIME_adj(nullptr, kReferenceTime, 1, 0));
+  if (!crl || !last_update || !next_update ||
+      !X509_CRL_set_version(crl.get(), X509_CRL_VERSION_2) ||
+      !X509_CRL_set_issuer_name(crl.get(), X509_get_subject_name(issuer)) ||
+      !X509_CRL_set1_lastUpdate(crl.get(), last_update.get()) ||
+      !X509_CRL_set1_nextUpdate(crl.get(), next_update.get())) {
+    return nullptr;
+  }
+
+  if (revoked_serial != nullptr) {
+    bssl::UniquePtr<X509_REVOKED> revoked(X509_REVOKED_new());
+    if (!revoked ||
+        !X509_REVOKED_set_serialNumber(revoked.get(), revoked_serial) ||
+        !X509_REVOKED_set_revocationDate(revoked.get(), last_update.get())) {
+      return nullptr;
+    }
+    if (!X509_CRL_add0_revoked(crl.get(), revoked.get())) {
+      return nullptr;
+    }
+    revoked.release();
+  }
+
+  if (!X509_CRL_sign(crl.get(), issuer_key, EVP_sha256())) {
+    return nullptr;
+  }
+  return crl;
+}
+
+// Test that the id-pkix-ocsp-nocheck extension on a delegated OCSP responder
+// certificate causes CRL checking to be skipped during verification. Without
+// the extension, verification should fail when CRL checking is enabled because
+// no CRL is available.
+TEST(OCSPTest, OCSPNoCheckExtension) {
+  // Generate CA key and self-signed CA cert.
+  bssl::UniquePtr<EVP_PKEY> ca_key(EVP_PKEY_new());
+  ASSERT_TRUE(ca_key);
+  bssl::UniquePtr<RSA> ca_rsa(RSA_new());
+  bssl::UniquePtr<BIGNUM> e(BN_new());
+  ASSERT_TRUE(BN_set_word(e.get(), RSA_F4));
+  ASSERT_TRUE(RSA_generate_key_ex(ca_rsa.get(), 2048, e.get(), nullptr));
+  ASSERT_TRUE(EVP_PKEY_set1_RSA(ca_key.get(), ca_rsa.get()));
+
+  bssl::UniquePtr<X509> ca_cert =
+      MakeTestCert("Test CA", "Test CA", ca_key.get(), /*is_ca=*/true);
+  ASSERT_TRUE(ca_cert);
+  ASSERT_TRUE(X509_sign(ca_cert.get(), ca_key.get(), EVP_sha256()));
+
+  // Generate responder key.
+  bssl::UniquePtr<EVP_PKEY> resp_key(EVP_PKEY_new());
+  ASSERT_TRUE(resp_key);
+  bssl::UniquePtr<RSA> resp_rsa(RSA_new());
+  ASSERT_TRUE(RSA_generate_key_ex(resp_rsa.get(), 2048, e.get(), nullptr));
+  ASSERT_TRUE(EVP_PKEY_set1_RSA(resp_key.get(), resp_rsa.get()));
+
+  // Create trust store with CRL checking enabled and verification time set
+  // to kReferenceTime (certs from MakeTestCert are only valid around that time).
+  bssl::UniquePtr<X509_STORE> trust_store(X509_STORE_new());
+  ASSERT_TRUE(trust_store);
+  ASSERT_TRUE(X509_STORE_add_cert(trust_store.get(), ca_cert.get()));
+  X509_STORE_set_flags(trust_store.get(), X509_V_FLAG_CRL_CHECK);
+  X509_VERIFY_PARAM *store_param = X509_STORE_get0_param(trust_store.get());
+  ASSERT_TRUE(store_param);
+  X509_VERIFY_PARAM_set_time_posix(store_param, kReferenceTime);
+
+  // Create an OCSP_CERTID for use in the OCSP response.
+  bssl::UniquePtr<OCSP_CERTID> cert_id(
+      OCSP_cert_to_id(EVP_sha1(), ca_cert.get(), ca_cert.get()));
+  ASSERT_TRUE(cert_id);
+
+  // Test with nocheck extension: verification should succeed despite CRL
+  // checking being enabled, because the extension causes the flag to be
+  // cleared for the responder cert.
+  {
+    bssl::UniquePtr<X509> responder_cert = MakeOCSPResponderCert(
+        resp_key.get(), ca_cert.get(), ca_key.get(), /*add_nocheck=*/true);
+    ASSERT_TRUE(responder_cert);
+
+    bssl::UniquePtr<OCSP_BASICRESP> bs(OCSP_BASICRESP_new());
+    ASSERT_TRUE(bs);
+
+    bssl::UniquePtr<ASN1_TIME> this_update(ASN1_TIME_adj(nullptr, kReferenceTime, -1, 0));
+    bssl::UniquePtr<ASN1_TIME> next_update(ASN1_TIME_adj(nullptr, kReferenceTime, 1, 0));
+    ASSERT_TRUE(OCSP_basic_add1_status(bs.get(), cert_id.get(),
+                                       V_OCSP_CERTSTATUS_GOOD, 0, nullptr,
+                                       this_update.get(), next_update.get()));
+
+    ASSERT_TRUE(OCSP_basic_sign(bs.get(), responder_cert.get(), resp_key.get(),
+                                EVP_sha256(),
+                                CertsToStack({ca_cert.get()}).get(), 0));
+
+    int ret = OCSP_basic_verify(
+        bs.get(), CertsToStack({responder_cert.get()}).get(), trust_store.get(),
+        0);
+    EXPECT_EQ(ret, OCSP_VERIFYSTATUS_SUCCESS)
+        << "Verification should succeed with nocheck extension";
+  }
+
+  ERR_clear_error();
+
+  // Test without nocheck extension: verification should fail because CRL
+  // checking is enabled but no CRL is available.
+  {
+    bssl::UniquePtr<X509> responder_cert = MakeOCSPResponderCert(
+        resp_key.get(), ca_cert.get(), ca_key.get(), /*add_nocheck=*/false);
+    ASSERT_TRUE(responder_cert);
+
+    bssl::UniquePtr<OCSP_BASICRESP> bs(OCSP_BASICRESP_new());
+    ASSERT_TRUE(bs);
+
+    bssl::UniquePtr<ASN1_TIME> this_update(ASN1_TIME_adj(nullptr, kReferenceTime, -1, 0));
+    bssl::UniquePtr<ASN1_TIME> next_update(ASN1_TIME_adj(nullptr, kReferenceTime, 1, 0));
+    ASSERT_TRUE(OCSP_basic_add1_status(bs.get(), cert_id.get(),
+                                       V_OCSP_CERTSTATUS_GOOD, 0, nullptr,
+                                       this_update.get(), next_update.get()));
+
+    ASSERT_TRUE(OCSP_basic_sign(bs.get(), responder_cert.get(), resp_key.get(),
+                                EVP_sha256(),
+                                CertsToStack({ca_cert.get()}).get(), 0));
+
+    int ret = OCSP_basic_verify(
+        bs.get(), CertsToStack({responder_cert.get()}).get(), trust_store.get(),
+        0);
+    EXPECT_NE(ret, OCSP_VERIFYSTATUS_SUCCESS)
+        << "Verification should fail without nocheck extension when CRL "
+           "checking is enabled";
+  }
+}
+
+// id-pkix-ocsp-nocheck on a responder certificate speaks for that certificate
+// alone (RFC 6960 section 4.2.2.2.1), so a CA above it is still checked for
+// revocation when the caller asked for the whole chain to be checked.
+TEST(OCSPTest, OCSPNoCheckDoesNotExemptIssuers) {
+  bssl::UniquePtr<BIGNUM> e(BN_new());
+  ASSERT_TRUE(e);
+  ASSERT_TRUE(BN_set_word(e.get(), RSA_F4));
+
+  auto new_key = [&e]() -> bssl::UniquePtr<EVP_PKEY> {
+    bssl::UniquePtr<EVP_PKEY> pkey(EVP_PKEY_new());
+    bssl::UniquePtr<RSA> rsa(RSA_new());
+    if (!pkey || !rsa ||
+        !RSA_generate_key_ex(rsa.get(), 2048, e.get(), nullptr) ||
+        !EVP_PKEY_set1_RSA(pkey.get(), rsa.get())) {
+      return nullptr;
+    }
+    return pkey;
+  };
+
+  bssl::UniquePtr<EVP_PKEY> root_key = new_key();
+  ASSERT_TRUE(root_key);
+  bssl::UniquePtr<EVP_PKEY> inter_key = new_key();
+  ASSERT_TRUE(inter_key);
+  bssl::UniquePtr<EVP_PKEY> resp_key = new_key();
+  ASSERT_TRUE(resp_key);
+
+  // Root CA -> intermediate CA -> delegated responder carrying nocheck.
+  bssl::UniquePtr<X509> root = MakeTestCert("Test Root CA", "Test Root CA",
+                                           root_key.get(), /*is_ca=*/true);
+  ASSERT_TRUE(root);
+  ASSERT_TRUE(ASN1_INTEGER_set(X509_get_serialNumber(root.get()), 3));
+  ASSERT_TRUE(X509_sign(root.get(), root_key.get(), EVP_sha256()));
+
+  bssl::UniquePtr<X509> intermediate = MakeTestCert(
+      "Test Root CA", "Test Intermediate CA", inter_key.get(), /*is_ca=*/true);
+  ASSERT_TRUE(intermediate);
+  ASSERT_TRUE(ASN1_INTEGER_set(X509_get_serialNumber(intermediate.get()), 2));
+  ASSERT_TRUE(X509_sign(intermediate.get(), root_key.get(), EVP_sha256()));
+
+  bssl::UniquePtr<X509> responder =
+      MakeOCSPResponderCert(resp_key.get(), intermediate.get(),
+                            inter_key.get(), /*add_nocheck=*/true);
+  ASSERT_TRUE(responder);
+
+  // The response covers a certificate issued by the intermediate, which makes
+  // the responder a delegate of the intermediate.
+  bssl::UniquePtr<X509> leaf = MakeTestCert(
+      "Test Intermediate CA", "Test Leaf", resp_key.get(), /*is_ca=*/false);
+  ASSERT_TRUE(leaf);
+  ASSERT_TRUE(ASN1_INTEGER_set(X509_get_serialNumber(leaf.get()), 5));
+  ASSERT_TRUE(X509_sign(leaf.get(), inter_key.get(), EVP_sha256()));
+
+  bssl::UniquePtr<OCSP_CERTID> cert_id(
+      OCSP_cert_to_id(EVP_sha1(), leaf.get(), intermediate.get()));
+  ASSERT_TRUE(cert_id);
+
+  bssl::UniquePtr<OCSP_BASICRESP> bs(OCSP_BASICRESP_new());
+  ASSERT_TRUE(bs);
+  bssl::UniquePtr<ASN1_TIME> this_update(
+      ASN1_TIME_adj(nullptr, kReferenceTime, -1, 0));
+  bssl::UniquePtr<ASN1_TIME> next_update(
+      ASN1_TIME_adj(nullptr, kReferenceTime, 1, 0));
+  ASSERT_TRUE(OCSP_basic_add1_status(bs.get(), cert_id.get(),
+                                     V_OCSP_CERTSTATUS_GOOD, 0, nullptr,
+                                     this_update.get(), next_update.get()));
+  ASSERT_TRUE(OCSP_basic_sign(bs.get(), responder.get(), resp_key.get(),
+                              EVP_sha256(),
+                              CertsToStack({intermediate.get()}).get(), 0));
+
+  // The store trusts the root and asks for every certificate in the chain to be
+  // checked against a CRL. The root's CRL covers both itself and the
+  // intermediate; nothing issues a CRL for the responder.
+  auto make_store = [&](X509_CRL *crl) -> bssl::UniquePtr<X509_STORE> {
+    bssl::UniquePtr<X509_STORE> store(X509_STORE_new());
+    if (!store || !X509_STORE_add_cert(store.get(), root.get()) ||
+        !X509_STORE_add_crl(store.get(), crl)) {
+      return nullptr;
+    }
+    X509_STORE_set_flags(store.get(),
+                         X509_V_FLAG_CRL_CHECK | X509_V_FLAG_CRL_CHECK_ALL);
+    X509_VERIFY_PARAM *param = X509_STORE_get0_param(store.get());
+    if (param == nullptr) {
+      return nullptr;
+    }
+    X509_VERIFY_PARAM_set_time_posix(param, kReferenceTime);
+    return store;
+  };
+
+  // A CRL revoking the intermediate must fail the response.
+  {
+    bssl::UniquePtr<X509_CRL> crl = MakeTestCRL(
+        root.get(), root_key.get(), X509_get0_serialNumber(intermediate.get()));
+    ASSERT_TRUE(crl);
+    bssl::UniquePtr<X509_STORE> store = make_store(crl.get());
+    ASSERT_TRUE(store);
+
+    EXPECT_EQ(OCSP_basic_verify(bs.get(), CertsToStack({responder.get()}).get(),
+                                store.get(), 0),
+              OCSP_VERIFYSTATUS_ERROR);
+    EXPECT_EQ(OCSP_R_CERTIFICATE_VERIFY_ERROR,
+              ERR_GET_REASON(ERR_get_error()));
+    ERR_clear_error();
+  }
+
+  // With nothing revoked, the responder's own lack of a CRL is still exempt.
+  {
+    bssl::UniquePtr<X509_CRL> crl =
+        MakeTestCRL(root.get(), root_key.get(), /*revoked_serial=*/nullptr);
+    ASSERT_TRUE(crl);
+    bssl::UniquePtr<X509_STORE> store = make_store(crl.get());
+    ASSERT_TRUE(store);
+
+    EXPECT_EQ(OCSP_basic_verify(bs.get(), CertsToStack({responder.get()}).get(),
+                                store.get(), 0),
+              OCSP_VERIFYSTATUS_SUCCESS);
+  }
 }

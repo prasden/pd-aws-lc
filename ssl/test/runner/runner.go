@@ -61,7 +61,7 @@ var (
 	handshakerPath     = flag.String("handshaker-path", "../../../build/ssl/test/handshaker", "The location of the handshaker binary.")
 	fuzzer             = flag.Bool("fuzzer", false, "If true, tests against a BoringSSL built in fuzzer mode.")
 	transcriptDir      = flag.String("transcript-dir", "", "The directory in which to write transcripts.")
-	idleTimeout        = flag.Duration("idle-timeout", 15*time.Second, "The number of seconds to wait for a read or write to bssl_shim.")
+	idleTimeout        = flag.Duration("idle-timeout", 30*time.Second, "The number of seconds to wait for a read or write to bssl_shim.")
 	deterministic      = flag.Bool("deterministic", false, "If true, uses a deterministic PRNG in the runner.")
 	allowUnimplemented = flag.Bool("allow-unimplemented", false, "If true, report pass even if some tests are unimplemented.")
 	looseErrors        = flag.Bool("loose-errors", false, "If true, allow shims to report an untranslated error code.")
@@ -69,6 +69,7 @@ var (
 	includeDisabled    = flag.Bool("include-disabled", false, "If true, also runs disabled tests.")
 	repeatUntilFailure = flag.Bool("repeat-until-failure", false, "If true, the first selected test will be run repeatedly until failure.")
 	// Added by aws-lc
+	retryOnTimeout     = flag.Bool("retry-on-timeout", false, "If true, retry tests that fail due to a runner-side TCP timeout. Useful for resource-constrained environments (e.g. emulated VMs).")
 	sslTransferConfig  = flag.String("ssl-transfer-test-file", "", "A path to file which includes the test names that can be converted for SSL transfer.")
 	sslFuzzSeedDir     = flag.String("ssl-fuzz-seed-dir", "", "The directory in which to write the output of |SSL_to_bytes|.")
 	testCaseStartIndex = flag.Int("test-case-start-index", -1, "If non-negative, test case is filtered in if the index in |testCases| >= test-case-start-index.")
@@ -1660,10 +1661,36 @@ func runTest(dispatcher *shimDispatcher, statusChan chan statusMsg, test *testCa
 	localErr := doExchanges(test, shim, resumeCount, &transcripts)
 	childErr := shim.wait()
 
-	// shim is marked as idled only when |idleTimeout| is reached.
-	// This retry fix is scoped with "InvalidChannelIDSignature-TLS13-TLS-Sync-SplitHandshakeRecords".
-	if shim.idled && test.name == "InvalidChannelIDSignature-TLS13-TLS-Sync-SplitHandshakeRecords" {
-		shim, err := newShimProcess(dispatcher, shimPath, flags, env)
+	// Determine if the test should be retried. shim.idled is set when the
+	// idle timeout kills the process. A child killed by a transient signal
+	// (SIGABRT, SIGKILL, SIGTERM, SIGPIPE) on resource-constrained CI is
+	// also typically caused by timing or resource contention. Retry once in
+	// either case; a real bug will fail again on the retry.
+	//
+	// Signals like SIGSEGV, SIGBUS, SIGFPE, and SIGILL indicate real bugs
+	// (memory safety, illegal instructions, etc.) and must not be retried.
+	var retryReason string
+	if shim.idled {
+		retryReason = "idle timeout"
+	} else if *retryOnTimeout {
+		if netErr, ok := localErr.(net.Error); ok && netErr.Timeout() {
+			retryReason = "local timeout"
+		}
+	}
+	if retryReason == "" {
+		if exitErr, ok := childErr.(*exec.ExitError); ok {
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+				switch status.Signal() {
+				case syscall.SIGABRT, syscall.SIGKILL, syscall.SIGTERM, syscall.SIGPIPE:
+					retryReason = fmt.Sprintf("signal: %s", status.Signal())
+				}
+			}
+		}
+	}
+	if retryReason != "" {
+		fmt.Fprintf(os.Stderr, "Retrying %s (%s)\n", test.name, retryReason)
+		var err error
+		shim, err = newShimProcess(dispatcher, shimPath, flags, env)
 		if err != nil {
 			return err
 		}
@@ -2615,6 +2642,27 @@ read alert 1 0
 					ReorderHandshakeFragments:       true,
 					MixCompleteMessageWithFragments: true,
 					MaxHandshakeRecordLength:        2,
+				},
+			},
+		},
+		{
+			protocol: dtls,
+			name:     "SendExtraFutureHandshakeFragment-AtWindowEdge-DTLS",
+			config: Config{
+				Bugs: ProtocolBugs{
+					// 7 == SSL_MAX_HANDSHAKE_FLIGHT. With the off-by-one
+					// in the outer filter, this fragment would hit the
+					// inner bounds check and abort the connection.
+					SendExtraFutureHandshakeFragment: 7,
+				},
+			},
+		},
+		{
+			protocol: dtls,
+			name:     "SendExtraFutureHandshakeFragment-FarFuture-DTLS",
+			config: Config{
+				Bugs: ProtocolBugs{
+					SendExtraFutureHandshakeFragment: 100,
 				},
 			},
 		},
@@ -3977,6 +4025,30 @@ func addCipherSuiteTests() {
 			},
 		},
 		flags:         []string{"-cipher", "DEFAULT:!AES"},
+		shouldFail:    true,
+		expectedError: ":WRONG_CIPHER_RETURNED:",
+	})
+
+	// In TLS 1.3, the client must reject a ServerHello whose selected cipher
+	// suite is not one the client offered, even if the cipher is otherwise a
+	// valid TLS 1.3 cipher.
+	testCases = append(testCases, testCase{
+		name: "UnsupportedCipherSuite-TLS13",
+		config: Config{
+			MaxVersion: VersionTLS13,
+			CipherSuites: []uint16{
+				TLS_AES_128_GCM_SHA256,
+				TLS_CHACHA20_POLY1305_SHA256,
+				TLS_AES_256_GCM_SHA384,
+			},
+			Bugs: ProtocolBugs{
+				IgnorePeerCipherPreferences: true,
+				SendCipherSuite:             TLS_AES_256_GCM_SHA384,
+			},
+		},
+		flags: []string{
+			"-tls13-ciphersuites", "TLS_AES_128_GCM_SHA256",
+		},
 		shouldFail:    true,
 		expectedError: ":WRONG_CIPHER_RETURNED:",
 	})
@@ -15760,10 +15832,12 @@ func addPeekTests() {
 //  3. Let Golang TLS client sends messages(len: |maxPlaintext * peek_rounds + 1|) to repeatedly test |SSL_peek|
 //     and |SSL_read|.
 //     Here, the peek_rounds is just a magic number used to test SSL_peek with more rounds.
-//     100 was used but it caused some tcp io timeout on macOS and OpenBSD. See below reference
+//     100 was used but it caused tcp i/o timeouts on macOS and OpenBSD, so it was reduced to 50.
+//     50 still caused timeouts on FreeBSD, Windows, NetBSD, and OpenBSD (see github.com/aws/aws-lc/issues/3141),
+//     so the default was lowered to 10, then further to 5. The env var override remains for stress testing.
 //     CryptoAlg-850?selectedConversation=8749cd07-dcec-44f1-8405-c22aad9fb306.
 func addServerPeekTests() {
-	const DEFAULT_PEEK_ROUNDS int = 50
+	const DEFAULT_PEEK_ROUNDS int = 5
 
 	peek_rounds := DEFAULT_PEEK_ROUNDS
 	if v := os.Getenv("AWS_LC_SSL_TEST_RUNNER_PEEK_ROUNDS"); len(v) != 0 {

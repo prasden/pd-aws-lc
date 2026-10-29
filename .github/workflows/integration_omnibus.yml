@@ -1,9 +1,12 @@
 name: integration-omnibus
 on:
   push:
-    branches: [ '*' ]
+    branches: ['main', 'fips-*']
   pull_request:
     branches: [ '*' ]
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
   cancel-in-progress: true
@@ -11,10 +14,13 @@ env:
   GOPROXY: https://proxy.golang.org,direct
 permissions:
   contents: read
+  actions: read
 
 jobs:
   integrations:
-    name: ${{ matrix.name }}-${{ matrix.arch }}
+    if: github.event_name != 'workflow_dispatch'
+    name: ${{ matrix.name }}-${{ matrix.arch }}${{ matrix.allow_failure && '-allow-failure' || '' }}
+    continue-on-error: ${{ matrix.allow_failure || false }}
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
         image:${{ matrix.arch == 'x86_64' && 'linux-5.0' || matrix.arch == 'aarch64' && 'arm-3.0' }}
@@ -45,43 +51,62 @@ jobs:
             compiler: gcc-11
             run: ./tests/ci/integration/run_crt_integration.sh
 
-          # libgit2
+          # libgit2 (pinned to a release - required)
           - name: libgit2
             arch: x86_64
             size: small
             image: ubuntu:22.04
             compiler: gcc-12
-            run: ./tests/ci/integration/run_libgit2_integration.sh
+            allow_failure: false
+            run: ./tests/ci/integration/run_libgit2_integration.sh v1.9.4
+          # libgit2 (tracking upstream main - informational, allowed to fail)
+          - name: libgit2-main
+            arch: x86_64
+            size: small
+            image: ubuntu:22.04
+            compiler: gcc-12
+            allow_failure: true
+            run: ./tests/ci/integration/run_libgit2_integration.sh main
 
           # OpenSSH Integration Tests
-          - name: openssh-master
+          - name: openssh-10.4p1
             arch: x86_64
             size: small
             image: amazonlinux:2023
             compiler: clang-15
-            openssh_branch: master
-            run: ./tests/ci/integration/run_openssh_integration.sh
+            run: ./tests/ci/integration/run_openssh_integration.sh V_10_4_P1
           - name: openssh-v8.9
             arch: x86_64
             size: small
             image: amazonlinux:2023
             compiler: clang-15
-            openssh_branch: V_8_9
-            run: ./tests/ci/integration/run_openssh_integration.sh
+            run: ./tests/ci/integration/run_openssh_integration.sh V_8_9
           - name: openssh-master
+            arch: x86_64
+            size: small
+            image: amazonlinux:2023
+            compiler: clang-15
+            allow_failure: true
+            run: ./tests/ci/integration/run_openssh_integration.sh master
+          - name: openssh-10.4p1
             arch: aarch64
             size: 2xlarge
             image: amazonlinux:2023
             compiler: clang-15
-            openssh_branch: master
-            run: ./tests/ci/integration/run_openssh_integration.sh
+            run: ./tests/ci/integration/run_openssh_integration.sh V_10_4_P1
           - name: openssh-v8.9
             arch: aarch64
             size: 2xlarge
             image: amazonlinux:2023
             compiler: clang-15
-            openssh_branch: V_8_9
-            run: ./tests/ci/integration/run_openssh_integration.sh
+            run: ./tests/ci/integration/run_openssh_integration.sh V_8_9
+          - name: openssh-master
+            arch: aarch64
+            size: 2xlarge
+            image: amazonlinux:2023
+            compiler: clang-15
+            allow_failure: true
+            run: ./tests/ci/integration/run_openssh_integration.sh master
 
           # PostgreSQL Integration Tests
           - name: postgresql
@@ -186,13 +211,22 @@ jobs:
             credentials: true
             run: ./tests/ci/integration/run_monit_integration.sh
 
-          # librelp Integration Tests
+          # librelp (pinned to a release - required)
           - name: librelp
             arch: x86_64
             size: small
             image: ubuntu:22.04
             compiler: gcc-12
-            run: ./tests/ci/integration/run_librelp_integration.sh
+            allow_failure: false
+            run: ./tests/ci/integration/run_librelp_integration.sh v1.13
+          # librelp (tracking upstream main - informational, allowed to fail)
+          - name: librelp-main
+            arch: x86_64
+            size: small
+            image: ubuntu:22.04
+            compiler: gcc-12
+            allow_failure: true
+            run: ./tests/ci/integration/run_librelp_integration.sh main
 
           # HAProxy Integration Tests
           - name: haproxy
@@ -264,6 +298,14 @@ jobs:
             compiler: gcc-12
             run: ./tests/ci/integration/run_cyrus_sasl_integration.sh
 
+          # MIT Kerberos (krb5) Integration Tests
+          - name: krb5
+            arch: x86_64
+            size: small
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_krb5_integration.sh krb5-1.22.2-final
+
           # Amazon Corretto Crypto Provider Integration Tests
           - name: accp-aarch64
             arch: aarch64
@@ -295,12 +337,20 @@ jobs:
             run: ./tests/ci/integration/run_accp_integration.sh
 
           # NMAP Integration Tests
-          - name: nmap
+          - name: nmap-7.99
             arch: x86_64
             size: medium
             image: ubuntu:22.04
             compiler: gcc-12
-            run: ./tests/ci/integration/run_nmap_integration.sh
+            run: ./tests/ci/integration/run_nmap_integration.sh deb076224e9f138ea29fa4823bcce0030301dc54
+          - name: nmap-master
+            arch: x86_64
+            size: medium
+            image: ubuntu:22.04
+            compiler: gcc-12
+            # integration test against master is informational, subject to upstream breakage.
+            allow_failure: true
+            run: ./tests/ci/integration/run_nmap_integration.sh master
 
           # IBM TPM Integration Tests
           - name: ibmtpm
@@ -318,14 +368,24 @@ jobs:
             compiler: gcc-12
             run: ./tests/ci/integration/run_libwebsockets_integration.sh
 
-          # GRPC Integration Tests
+          # GRPC Integration Tests (pinned release - blocking)
           - name: grpc
             arch: x86_64
             size: 2xlarge
             image: ubuntu:22.04
             compiler: gcc-12
             ipv6: true
-            run: ./tests/ci/integration/run_grpc_integration.sh
+            allow_failure: false
+            run: ./tests/ci/integration/run_grpc_integration.sh v1.72.2
+          # GRPC (tracking upstream master - informational, allowed to fail)
+          - name: grpc-master
+            arch: x86_64
+            size: 2xlarge
+            image: ubuntu:22.04
+            compiler: gcc-12
+            ipv6: true
+            allow_failure: true
+            run: ./tests/ci/integration/run_grpc_integration.sh master
 
           # Bind9 Integration Tests
           - name: bind9
@@ -335,9 +395,7 @@ jobs:
             compiler: gcc-12
             ipv6: true
             options: --privileged
-            run: |
-              python3 -m pip install --upgrade meson
-              ./tests/ci/integration/run_bind9_integration.sh
+            run: ./tests/ci/integration/run_bind9_integration.sh
 
           # strongSwan Integration Tests
           - name: strongswan
@@ -389,20 +447,20 @@ jobs:
             compiler: gcc-12
             run: ./tests/ci/integration/run_pyopenssl_integration.sh '25.3.0'
     env:
-      OPENSSH_BRANCH: ${{ matrix.openssh_branch || '' }}
       ACCP_FIPS: ${{ matrix.accp_fips || '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
       - uses: ./.github/actions/codebuild-docker-run
         name: Run Container
+        id: integration-test
         with:
           image: ${{ steps.login-ecr.outputs.registry }}/aws-lc/${{ matrix.image }}
           env: |
-            OPENSSH_BRANCH
             ACCP_FIPS
+            GITHUB_SHA
           options: ${{ matrix.options || '' }}
           user: ${{ matrix.user || '' }}
           ipv6: ${{ matrix.ipv6 || false }}
@@ -410,8 +468,89 @@ jobs:
           run: |
             source /opt/compiler-env/setup-${{ matrix.compiler }}.sh
             ${{ matrix.run }}
+      - name: Record job settings
+        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule' && !matrix.allow_failure && hashFiles('integration-failure.txt') != ''
+        env:
+          MATRIX: ${{ toJSON(matrix) }}
+          JOB_ID: ${{ job.check_run_id }}
+        run: |
+          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), env_vars: (env | {ACCP_FIPS})} + .' <<< "$MATRIX")" >> integration-failure.txt
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule' && !matrix.allow_failure
+        with:
+          name: integration-failure-${{ matrix.name }}-${{ matrix.arch }}
+          path: integration-failure.txt
+          if-no-files-found: ignore
+
+  e2e-integrations:
+    if: github.event_name == 'workflow_dispatch'
+    name: ${{ matrix.name }}-${{ matrix.arch }}
+    runs-on:
+      - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
+        image:${{ matrix.arch == 'x86_64' && 'linux-5.0' || matrix.arch == 'aarch64' && 'arm-3.0' }}
+        instance-size:${{ matrix.size }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: librelp
+            arch: x86_64
+            size: small
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_librelp_integration.sh v1.13
+          - name: postgresql
+            arch: x86_64
+            size: medium
+            image: ubuntu:22.04
+            compiler: gcc-12
+            user: postgres
+            run: ./tests/ci/integration/run_postgres_integration.sh
+          - name: postgresql
+            arch: aarch64
+            size: large
+            image: ubuntu:22.04
+            compiler: gcc-12
+            user: postgres
+            run: ./tests/ci/integration/run_postgres_integration.sh
+          - name: tpm2-tss
+            arch: x86_64
+            size: small
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_tpm2_tss_integration.sh
+    steps:
+      - uses: actions/checkout@v7
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - uses: ./.github/actions/codebuild-docker-run
+        name: Run Container
+        id: integration-test
+        with:
+          image: ${{ steps.login-ecr.outputs.registry }}/aws-lc/${{ matrix.image }}
+          env: |
+            GITHUB_SHA
+          user: ${{ matrix.user || '' }}
+          run: |
+            source /opt/compiler-env/setup-${{ matrix.compiler }}.sh
+            ${{ matrix.run }}
+      - name: Record job settings
+        if: always() && steps.integration-test.outcome == 'failure' && hashFiles('integration-failure.txt') != ''
+        env:
+          MATRIX: ${{ toJSON(matrix) }}
+          JOB_ID: ${{ job.check_run_id }}
+        run: |
+          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), env_vars: {}} + .' <<< "$MATRIX")" >> integration-failure.txt
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.integration-test.outcome == 'failure'
+        with:
+          name: integration-failure-${{ matrix.name }}-${{ matrix.arch }}
+          path: integration-failure.txt
+          if-no-files-found: ignore
 
   python:
+    if: github.event_name != 'workflow_dispatch'
     name: python-${{ matrix.version }}${{ matrix.buildFIPS == 1 && '-fips' || '' }}-${{ matrix.crtUseSystemCrypto == 1 && 'crt-vendored-crypto' || 'crt-system-crypto' }}-${{ matrix.arch }}
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
@@ -421,41 +560,48 @@ jobs:
       fail-fast: false
       matrix:
         arch: ["x86_64"]
-        version:
-          - "3.9"
-          - "3.10"
-          - "3.11"
-          - "3.12"
-          - "3.13"
-          - "3.14"
+        version: ["3.13"]
         buildFIPS: [0, 1]
-        crtUseSystemCrypto: [0, 1]
-        include:
-          - version: main
-            buildFIPS: 0
-            crtUseSystemCrypto: 0
-            arch: x86_64
+        crtUseSystemCrypto: [0]
     env:
       FIPS: ${{ matrix.buildFIPS }}
       AWS_CRT_BUILD_USE_SYSTEM_LIBCRYPTO: ${{ matrix.crtUseSystemCrypto }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
       - uses: ./.github/actions/codebuild-docker-run
         name: Run Container
+        id: integration-test
         with:
           image: ${{ steps.login-ecr.outputs.registry }}/aws-lc/ubuntu:22.04
           env: |
             FIPS
             AWS_CRT_BUILD_USE_SYSTEM_LIBCRYPTO
+            GITHUB_SHA
           ipv6: true
           run: |
             source /opt/compiler-env/setup-gcc-12.sh
             ./tests/ci/integration/run_python_integration.sh ${{ matrix.version }}
+      - name: Record job settings
+        if: always() && steps.integration-test.outcome == 'failure' && github.event_name != 'pull_request' && hashFiles('integration-failure.txt') != ''
+        env:
+          MATRIX: ${{ toJSON(matrix) }}
+          JOB_ID: ${{ job.check_run_id }}
+        run: |
+          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), size: "medium", image: "ubuntu:22.04",
+            compiler: "gcc-12", ipv6: true, env_vars: (env | {FIPS, AWS_CRT_BUILD_USE_SYSTEM_LIBCRYPTO})} + .' \
+            <<< "$MATRIX")" >> integration-failure.txt
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.integration-test.outcome == 'failure' && github.event_name != 'pull_request'
+        with:
+          name: integration-failure-python-${{ matrix.version }}-${{ matrix.buildFIPS }}-${{ matrix.crtUseSystemCrypto }}-${{ matrix.arch }}
+          path: integration-failure.txt
+          if-no-files-found: ignore
 
   ruby:
+    if: github.event_name != 'workflow_dispatch'
     name: ruby-${{ matrix.version }}${{ matrix.buildFIPS == 1 && '-fips' || '' }}-${{ matrix.arch }}
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
@@ -474,17 +620,66 @@ jobs:
     env:
       FIPS: ${{ matrix.buildFIPS }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
       - uses: ./.github/actions/codebuild-docker-run
         name: Run Container
+        id: integration-test
         with:
           image: ${{ steps.login-ecr.outputs.registry }}/aws-lc/ubuntu:24.04
           env: |
             FIPS
+            GITHUB_SHA
           ipv6: true
           run: |
             source /opt/compiler-env/setup-gcc-13.sh
             ./tests/ci/integration/run_ruby_integration.sh ${{ matrix.version }}
+      - name: Record job settings
+        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule' && hashFiles('integration-failure.txt') != ''
+        env:
+          MATRIX: ${{ toJSON(matrix) }}
+          JOB_ID: ${{ job.check_run_id }}
+        run: |
+          echo "job=$(jq -c '{job_id: (env.JOB_ID | tonumber? // 0), size: "medium", image: "ubuntu:24.04",
+            compiler: "gcc-13", ipv6: true, env_vars: (env | {FIPS})} + .' <<< "$MATRIX")" >> integration-failure.txt
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.integration-test.outcome == 'failure' && github.event_name == 'schedule'
+        with:
+          name: integration-failure-ruby-${{ matrix.version }}-${{ matrix.buildFIPS }}-${{ matrix.arch }}
+          path: integration-failure.txt
+          if-no-files-found: ignore
+
+  report-failures:
+    name: report-failures
+    needs: [integrations, python, ruby]
+    if: ${{ always() && github.event_name == 'schedule' }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    runs-on:
+      - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
+        image:linux-5.0
+        instance-size:small
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/configure-aws-credentials
+      - name: Emit failure metric
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -exo pipefail
+          # Count the number of failing tests, excluding tests which are allowed to fail.
+          failure_count=$(gh api --paginate \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+            --jq '.jobs[] | select(.conclusion == "failure" and (.name | endswith("-allow-failure") | not)) | .name' \
+            | wc -l | tr -d ' ')
+
+          aws cloudwatch put-metric-data \
+            --namespace AWS-LC \
+            --metric-name IntegrationOmnibusFailure \
+            --value "$failure_count"

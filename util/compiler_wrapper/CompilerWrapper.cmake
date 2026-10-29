@@ -3,8 +3,10 @@
 
 # CompilerWrapper.cmake
 #
-# CMake module for handling compiler flag conflicts, particularly the -S/-c conflict
-# in newer Clang versions when generating assembly output.
+# CMake module for handling the -S/-c flag conflict that arises when CMake
+# generates the compile command for the bcm_c_generated_asm target. CMake's
+# static library rules always include -c, but we set COMPILE_OPTIONS "-S" to
+# produce textual assembly. The wrapper strips -c when -S is present.
 #
 # This module dynamically generates wrapper scripts with hardcoded compiler paths,
 # eliminating the need for complex compiler discovery logic.
@@ -14,25 +16,17 @@
 #   setup_compiler_wrapper()
 #   use_compiler_wrapper_for_target(my_target)
 
-cmake_minimum_required(VERSION 3.5)
+# The bcm_c_generated_asm target uses COMPILE_OPTIONS "-S" on a normal CMake
+# static library, which causes CMake to emit both -S and -c in the same
+# command. This is semantically contradictory (-S = emit assembly, -c = emit
+# object code). GCC and older Clang versions silently let -S win, but other
+# compilers (Clang 20+, Zig) reject or mishandle the conflicting flags. The
+# wrapper unconditionally strips -c when -S is present, making the build
+# correct for all compilers.
 
-# Check if we need the compiler wrapper based on compiler version
-function(compiler_wrapper_needed result_var)
-  set(${result_var} FALSE PARENT_SCOPE)
-
-  # Check C compiler
-  if(CMAKE_C_COMPILER_ID MATCHES "Clang" OR CMAKE_C_COMPILER MATCHES "clang")
-    if(CMAKE_C_COMPILER_VERSION VERSION_GREATER "19.99.99")
-      set(${result_var} TRUE PARENT_SCOPE)
-      return()
-    endif()
-  endif()
-
-  # Allow manual override via CMake variable
-  if(FORCE_COMPILER_WRAPPER)
-    set(${result_var} TRUE PARENT_SCOPE)
-  endif()
-endfunction()
+# Save the directory of this file at include-time. Inside functions,
+# CMAKE_CURRENT_LIST_DIR reflects the *caller's* directory, not ours.
+set(_COMPILER_WRAPPER_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 # Generate wrapper scripts with hardcoded compiler paths
 function(generate_compiler_wrapper)
@@ -44,7 +38,7 @@ function(generate_compiler_wrapper)
   file(MAKE_DIRECTORY "${WRAPPER_OUTPUT_DIR}")
 
   # Generate shell script wrapper (Unix/Linux/macOS)
-  set(SHELL_TEMPLATE "${CMAKE_SOURCE_DIR}/util/compiler_wrapper/compiler_wrapper_template.sh.in")
+  set(SHELL_TEMPLATE "${_COMPILER_WRAPPER_DIR}/compiler_wrapper_template.sh.in")
   set(SHELL_OUTPUT "${WRAPPER_OUTPUT_DIR}/compiler_wrapper.sh")
 
   if(EXISTS "${SHELL_TEMPLATE}")
@@ -62,7 +56,7 @@ function(generate_compiler_wrapper)
   endif()
 
   # Generate batch file wrapper (Windows)
-  set(BAT_TEMPLATE "${CMAKE_SOURCE_DIR}/util/compiler_wrapper/compiler_wrapper_template.bat.in")
+  set(BAT_TEMPLATE "${_COMPILER_WRAPPER_DIR}/compiler_wrapper_template.bat.in")
   set(BAT_OUTPUT "${WRAPPER_OUTPUT_DIR}/compiler_wrapper.bat")
 
   if(EXISTS "${BAT_TEMPLATE}")
@@ -93,14 +87,6 @@ endfunction()
 
 # Set up the compiler wrapper system
 function(setup_compiler_wrapper)
-  # Check if we need the wrapper
-  compiler_wrapper_needed(NEED_WRAPPER)
-  if(NOT NEED_WRAPPER)
-    message(STATUS "Compiler wrapper not needed for current compiler version")
-    set(COMPILER_WRAPPER_AVAILABLE FALSE CACHE INTERNAL "Whether compiler wrapper is available")
-    return()
-  endif()
-
   # Determine the compiler to wrap
   set(REAL_COMPILER "${CMAKE_C_COMPILER}")
   if(NOT REAL_COMPILER)
@@ -133,12 +119,23 @@ function(setup_compiler_wrapper)
     message(FATAL_ERROR "Failed to generate compiler wrapper script")
   endif()
 
+  # Launch via an explicit interpreter rather than the shebang or executable bit,
+  # neither of which survives every environment this tree is vendored into.
+  # /bin/sh is no new dependency; Make and Ninja already run recipes through it.
+  if(COMPILER_WRAPPER_BAT AND WRAPPER_SCRIPT STREQUAL "${COMPILER_WRAPPER_BAT}")
+    set(WRAPPER_LAUNCHER "${WRAPPER_SCRIPT}")
+  else()
+    set(WRAPPER_LAUNCHER "/bin/sh" "${WRAPPER_SCRIPT}")
+  endif()
+
   # Store wrapper information in cache for use by other functions
   set(COMPILER_WRAPPER_SCRIPT "${WRAPPER_SCRIPT}" CACHE INTERNAL "Path to generated compiler wrapper script")
+  set(COMPILER_WRAPPER_LAUNCHER "${WRAPPER_LAUNCHER}" CACHE INTERNAL "Command used to launch the compiler wrapper")
   set(COMPILER_WRAPPER_REAL_COMPILER "${REAL_COMPILER}" CACHE INTERNAL "Real compiler being wrapped")
   set(COMPILER_WRAPPER_AVAILABLE TRUE CACHE INTERNAL "Whether compiler wrapper is available")
 
   message(STATUS "Compiler wrapper ready: ${WRAPPER_SCRIPT}")
+  message(STATUS "Compiler wrapper launch command: ${WRAPPER_LAUNCHER}")
 endfunction()
 
 # Apply the compiler wrapper to a specific target
@@ -157,7 +154,7 @@ function(use_compiler_wrapper_for_target target_name)
 
   # Set the compiler launcher to use our wrapper
   set_target_properties(${target_name} PROPERTIES
-        C_COMPILER_LAUNCHER "${COMPILER_WRAPPER_SCRIPT}"
+        C_COMPILER_LAUNCHER "${COMPILER_WRAPPER_LAUNCHER}"
     )
 
   message(STATUS "Applied compiler wrapper to target: ${target_name}")

@@ -71,8 +71,7 @@ static int crl_parse_entry_extensions(X509_CRL *crl) {
     ASN1_ENUMERATED *reason =
         X509_REVOKED_get_ext_d2i(rev, NID_crl_reason, &crit, NULL);
     if (!reason && crit != -1) {
-      crl->flags |= EXFLAG_INVALID;
-      return 1;
+      return 0;
     }
 
     if (reason) {
@@ -96,6 +95,17 @@ static int crl_parse_entry_extensions(X509_CRL *crl) {
   return 1;
 }
 
+// |ASN1_OP_D2I_POST| below only sets these, never clears them, so whatever this
+// leaves behind applies to the next CRL parsed into |crl|.
+static void crl_invalidate_cache(X509_CRL *crl) {
+  AUTHORITY_KEYID_free(crl->akid);
+  crl->akid = NULL;
+  ISSUING_DIST_POINT_free(crl->idp);
+  crl->idp = NULL;
+  crl->flags = 0;
+  crl->idp_flags = 0;
+}
+
 // The X509_CRL structure needs a bit of customisation. Cache some extensions
 // and hash of the whole CRL.
 static int crl_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
@@ -105,10 +115,11 @@ static int crl_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
 
   switch (operation) {
     case ASN1_OP_NEW_POST:
-      crl->idp = NULL;
-      crl->akid = NULL;
-      crl->flags = 0;
-      crl->idp_flags = 0;
+      crl_invalidate_cache(crl);
+      break;
+
+    case ASN1_OP_D2I_PRE:
+      crl_invalidate_cache(crl);
       break;
 
     case ASN1_OP_D2I_POST: {
@@ -139,6 +150,8 @@ static int crl_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
           X509_CRL_get_ext_d2i(crl, NID_issuing_distribution_point, &i, NULL);
       if (crl->idp != NULL) {
         if (!setup_idp(crl, crl->idp)) {
+          ISSUING_DIST_POINT_free(crl->idp);
+          crl->idp = NULL;
           return 0;
         }
       } else if (i != -1) {
@@ -148,6 +161,8 @@ static int crl_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
       crl->akid =
           X509_CRL_get_ext_d2i(crl, NID_authority_key_identifier, &i, NULL);
       if (crl->akid == NULL && i != -1) {
+        ISSUING_DIST_POINT_free(crl->idp);
+        crl->idp = NULL;
         return 0;
       }
 
@@ -170,6 +185,10 @@ static int crl_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
       }
 
       if (!crl_parse_entry_extensions(crl)) {
+        AUTHORITY_KEYID_free(crl->akid);
+        crl->akid = NULL;
+        ISSUING_DIST_POINT_free(crl->idp);
+        crl->idp = NULL;
         return 0;
       }
 
@@ -177,8 +196,7 @@ static int crl_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
     }
 
     case ASN1_OP_FREE_POST:
-      AUTHORITY_KEYID_free(crl->akid);
-      ISSUING_DIST_POINT_free(crl->idp);
+      crl_invalidate_cache(crl);
       break;
   }
   return 1;
@@ -221,10 +239,7 @@ static int setup_idp(X509_CRL *crl, ISSUING_DIST_POINT *idp) {
   if (idp->onlysomereasons) {
     crl->idp_flags |= IDP_REASONS;
   }
-
-  // TODO(davidben): The new verifier does not support nameRelativeToCRLIssuer.
-  // Remove this?
-  return DIST_POINT_set_dpname(idp->distpoint, X509_CRL_get_issuer(crl));
+  return 1;
 }
 
 ASN1_SEQUENCE_ref(X509_CRL, crl_cb) = {

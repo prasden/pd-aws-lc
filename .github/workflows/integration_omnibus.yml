@@ -493,18 +493,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: trousers
-            arch: x86_64
-            size: small
-            image: ubuntu:22.04
-            compiler: gcc-12
-            run: ./tests/ci/integration/run_trousers_integration.sh
           - name: librelp
             arch: x86_64
             size: small
             image: ubuntu:22.04
             compiler: gcc-12
             run: ./tests/ci/integration/run_librelp_integration.sh v1.13
+          - name: postgresql
+            arch: x86_64
+            size: medium
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_postgres_integration.sh
+          - name: postgresql
+            arch: aarch64
+            size: large
+            image: ubuntu:22.04
+            compiler: gcc-12
+            run: ./tests/ci/integration/run_postgres_integration.sh
+          - name: bind9
+            arch: x86_64
+            size: medium
+            image: ubuntu:22.04
+            compiler: gcc-12
+            ipv6: true
+            options: --privileged
+            run: ./tests/ci/integration/run_bind9_integration.sh
     steps:
       - uses: actions/checkout@v7
       - name: Login to Amazon ECR
@@ -517,6 +531,8 @@ jobs:
           image: ${{ steps.login-ecr.outputs.registry }}/aws-lc/${{ matrix.image }}
           env: |
             GITHUB_SHA
+          options: ${{ matrix.options || '' }}
+          ipv6: ${{ matrix.ipv6 || false }}
           run: |
             source /opt/compiler-env/setup-${{ matrix.compiler }}.sh
             ${{ matrix.run }}
@@ -535,6 +551,7 @@ jobs:
           if-no-files-found: ignore
 
   python:
+    if: github.event_name != 'workflow_dispatch'
     name: python-${{ matrix.version }}${{ matrix.buildFIPS == 1 && '-fips' || '' }}-${{ matrix.crtUseSystemCrypto == 1 && 'crt-vendored-crypto' || 'crt-system-crypto' }}-${{ matrix.arch }}
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}

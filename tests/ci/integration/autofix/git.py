@@ -1,14 +1,12 @@
 import os
-import re
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Self
 
+from pydantic import Field
 from pydantic.dataclasses import dataclass
 
-_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
-_REPO_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 _LOCKED_DOWN_GIT = (
     "-c", "protocol.ext.allow=never",
     "-c", "protocol.fd.allow=never",
@@ -26,12 +24,8 @@ class Repo:
     Downstream tests can rewrite that file, so only https URLs, full SHAs, and plain folder names pass.
     """
 
-    url: str
-    sha: str
-
-    def __post_init__(self):
-        if not (self.url.startswith("https://") and _COMMIT_SHA.fullmatch(self.sha) and _REPO_NAME.fullmatch(self.name)):
-            raise ValueError(f"rejected repo from integration-failure.txt: {self.url} {self.sha}")
+    url: str = Field(pattern=r"^https://\S+/[A-Za-z0-9_-][A-Za-z0-9._-]*$")
+    sha: str = Field(pattern=r"^[0-9a-f]{40}$")
 
     @property
     def name(self) -> str:
@@ -85,10 +79,8 @@ class Git:
         git.run("fetch", "-q", "--no-tags", "--depth", "500", repo.url, repo.sha)
         git.run("checkout", "-q", "FETCH_HEAD")
         history = set(git.run("rev-list", "HEAD").split())
-        refs = {}
-        for line in git.run("ls-remote", "--heads", "--tags", repo.url).splitlines():
-            sha, name = line.split("\t")
-            refs[name.removesuffix("^{}")] = sha
+        refs = {name.removesuffix("^{}"): sha for sha, name in
+                (line.split("\t") for line in git.run("ls-remote", "--heads", "--tags", repo.url).splitlines())}
         git.run("update-ref", "--stdin", input="".join(
             f"update {name} {repo.sha if name.startswith('refs/heads/') else sha}\n"
             for name, sha in refs.items() if name.startswith("refs/heads/") or sha in history))

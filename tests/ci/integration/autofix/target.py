@@ -72,23 +72,15 @@ def recognize(reports: Path, awslc: Repo) -> list[dict]:
             name, version = head.split("\t")
             repos = [Repo(*line.removeprefix("commit=").split()) for line in lines if line.startswith("commit=")]
             env = Environment.model_validate_json(lines[-1].removeprefix("job="))
-            target = targets.setdefault(
+            targets.setdefault(
                 (name, version),
-                IntegrationTarget(
-                    name=name,
-                    version=version,
-                    awslc=awslc,
-                    repos=repos,
-                    environments=[],
-                ),
-            )
+                IntegrationTarget(name=name, version=version, awslc=awslc, repos=repos, environments=[]),
+            ).environments.append(env)
         except (ValueError, IndexError) as error:
             logging.warning("skipping a bad integration-failure.txt: %s", error)
-            continue
-        target.environments.append(env)
     matrix = []
     for target in targets.values():
-        arch = "x86_64" if target.on("x86_64") else "aarch64"
-        matrix.append({"name": target.dir_name, "arch": arch, "size": target.on(arch)[0].size,
+        env = (target.on("x86_64") or target.environments)[0]
+        matrix.append({"name": target.dir_name, "arch": env.arch, "size": env.size,
                        "target": target.model_dump(mode="json")})
     return matrix

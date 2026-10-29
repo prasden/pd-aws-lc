@@ -14,6 +14,6 @@ match sys.argv[1:]:
     case ["reason"]:
         sys.exit(not Harness.from_env().reason(os.environ["ECR_REGISTRY"]).passed)
     case ["review"]:
-        sys.exit(not Harness.from_env().review(os.environ["RUN_URL"]).safe)
+        sys.exit(not Harness.from_env().review().safe)
     case _:
         sys.exit("usage: python -m autofix recognize REPORTS | reason | review")

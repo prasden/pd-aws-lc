@@ -19,9 +19,6 @@ jobs:
         image:linux-5.0
         instance-size:small
     timeout-minutes: 15
-    permissions:
-      contents: read
-      id-token: write
     env:
       BRANCH: autofix/${{ matrix.name }}
       MESSAGE: Fix the ${{ matrix.name }} integration patch

@@ -30,13 +30,15 @@ jobs:
     outputs:
       targets: ${{ steps.targets.outputs.targets }}
     steps:
-      - uses: actions/checkout@v7
+      - &checkout
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - run: pip install -r tests/ci/integration/autofix/requirements.txt
+      - &install
+        run: python3 -m pip install -r tests/ci/integration/autofix/requirements.txt
       - uses: actions/download-artifact@v8
         with:
           pattern: integration-failure-*
@@ -84,22 +86,18 @@ jobs:
       max-parallel: 5
       matrix:
         include: ${{ fromJSON(needs.get-failing-integrations.outputs.targets) }}
-    # Run on a CodeBuild image with the same arch and size as the failed job.
     runs-on: &codebuild
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
         image:${{ matrix.arch == 'aarch64' && 'arm-3.0' || 'linux-5.0' }}
         instance-size:${{ matrix.size }}
-    permissions:
+    permissions: &oidc
       contents: read
       id-token: write
     env: &target
       TARGET: ${{ toJSON(matrix.target) }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - &install
-        run: python3 -m pip install -r tests/ci/integration/autofix/requirements.txt
+      - *checkout
+      - *install
       - uses: actions/download-artifact@v8
         with:
           name: autofix-logs
@@ -114,10 +112,8 @@ jobs:
       - name: Pull this arch's CI images and log out of ECR before the agent starts
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ARCH: ${{ matrix.arch }}
         run: |
-          # Pull the images the replays need now. Then log out so the agent cannot reach ECR.
-          for image in $(jq -r --arg arch "$ARCH" '[.environments[] | select(.arch == $arch).image] | unique[]' <<< "$TARGET"); do
+          for image in $(jq -r --arg arch "$(uname -m)" '[.environments[] | select(.arch == $arch).image] | unique[]' <<< "$TARGET"); do
             docker pull -q "$ECR_REGISTRY/aws-lc/$image"
           done
           docker logout "$ECR_REGISTRY"
@@ -143,7 +139,7 @@ jobs:
         if: always()
         with:
           name: autofix-${{ matrix.name }}
-          path: autofix-work/out/
+          path: ${{ env.WORK_DIR }}/out/
           overwrite: true
 
   review:
@@ -153,34 +149,26 @@ jobs:
     strategy: *per-target
     runs-on: *codebuild
     timeout-minutes: 60
-    permissions:
-      contents: read
-      id-token: write
+    permissions: *oidc
     env: *target
     steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
+      - *checkout
       - *install
       - uses: actions/download-artifact@v8
         with:
           name: autofix-${{ matrix.name }}
-          path: autofix-work/out/
+          path: ${{ env.WORK_DIR }}/out/
       - *bedrock-region
       - *bedrock
       - name: Review the fix
         working-directory: tests/ci/integration
-        env:
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python3 -m autofix review
       - *upload
 
   resolve:
     needs: [get-failing-integrations, review]
     if: ${{ !cancelled() && needs.review.result != 'skipped' }}
-    permissions:
-      contents: read
-      id-token: write
+    permissions: *oidc
     uses: ./.github/workflows/autofix_resolve.yml
     with:
       targets: ${{ needs.get-failing-integrations.outputs.targets }}

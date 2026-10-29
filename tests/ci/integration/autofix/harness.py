@@ -18,8 +18,7 @@ from .git import Git
 from .sandbox import Sandbox, ReplayResult
 from .target import IntegrationTarget
 
-_AI_CONFIG = json.loads((Path(__file__).parents[4] / ".github/workflows/ai-config.json").read_text())
-_MODEL = f"bedrock/{_AI_CONFIG['opus']}"
+_MODEL = f"bedrock/{json.loads((Path(__file__).parents[4] / '.github/workflows/ai-config.json').read_text())['opus']}"
 _LIMITS = Limits(turns=150, total_tokens=6_000_000)
 _TIMEOUT = 45 * 60
 _REASON_TIMEOUT = 60 * 60
@@ -53,23 +52,22 @@ class _BedrockRetry(ModelRetryStrategy):
 
 class Harness:
     def __init__(self, work_dir: Path, target: IntegrationTarget):
-        self.work_dir = work_dir.resolve()
+        self.work_dir = work_dir
         self.target = target
-        self.out = self.work_dir / "out"
-        self.out.mkdir(parents=True, exist_ok=True)
+        self.out = work_dir / "out"
+        self.logs = {log.name: log for log in sorted((self.out / "logs").glob("*.log"))}
 
     @classmethod
     def from_env(cls) -> Self:
         return cls(Path(os.environ["WORK_DIR"]), IntegrationTarget.model_validate_json(os.environ["TARGET"]))
 
     @staticmethod
-    def _run_agent(instructions: str, message: str, timeout: int, call: dict[str, Any], **options: Any) -> AgentResult:
+    def _run_agent(instructions: str, message: str, timeout: int, **options: Any) -> AgentResult:
         agent = create_harness(**{
             "model": _MODEL,
             "instructions": instructions,
             "builtin_tools": [],
             "builtin_plugins": [],
-            "context_manager": "auto",
             "session": False,
             "memory": False,
             "skills": False,
@@ -80,17 +78,16 @@ class Harness:
         timer = threading.Timer(timeout, agent.cancel)
         timer.start()
         try:
-            return agent(message, limits=_LIMITS, **call)
+            return agent(message, limits=_LIMITS)
         finally:
             timer.cancel()
 
     def reason(self, registry: str) -> ReplayResult:
-        """Let the agent fix the target, then replay its final diff and record whether it passes."""
         sandbox = Sandbox(self.work_dir, self.target, registry)
         instructions = (_PROMPTS / "agent.md").read_text().format(
             name=self.target.name,
             version=self.target.version,
-            root=str(sandbox.root),
+            root=sandbox.root,
             repos=", ".join(f"`src/{repo.name}` ({repo.url} at {repo.sha})" for repo in self.target.repos),
             editable=", ".join(f"`aws-lc/{path}`" for path in sandbox.editable),
         )
@@ -99,7 +96,6 @@ class Harness:
                 instructions,
                 "Start by reading the logs.",
                 _REASON_TIMEOUT,
-                {},
                 sandbox=container,
                 tools=[sandbox.run_integration, sandbox.run],
                 builtin_tools=["read", "write", "edit"],
@@ -124,13 +120,12 @@ class Harness:
             start_line: The first line to return, counting from 1.
             line_count: How many lines to return.
         """
-        logs = {log.name: log for log in (self.out / "logs").glob("*.log")}
-        lines = logs[name].read_text().splitlines()
-        return "\n".join(lines[max(start_line, 1) - 1:][:min(line_count, _READ_LOG_MAX_LINES)])
+        lines = self.logs[name].read_text().splitlines()
+        start = max(start_line, 1) - 1
+        return "\n".join(lines[start:start + min(max(line_count, 0), _READ_LOG_MAX_LINES)])
 
-    def review(self, run_url: str) -> ReviewVerdict:
-        """Check a fix's diff to see if it follow rules, then by a new reviewer model that checks
-        the diff and description.
+    def review(self) -> ReviewVerdict:
+        """Check the fix against the fixed rules, then have a new reviewer model check its diff and description.
 
         Write pr.md only for a safe fix. The resolve GHA opens a PR only when pr.md exists.
         """
@@ -143,7 +138,7 @@ class Harness:
             verdict = ReviewVerdict(safe=False, findings=["The diff breaks a fixed rule: scope, secrets, or hidden text."])
         else:
             logs = "\n".join(f"- `{log.name}`: {len(log.read_text().splitlines())} lines"
-                             for log in sorted((self.out / "logs").glob("*.log")))
+                             for log in self.logs.values())
             message = (f"<logs>\n{logs}\n</logs>\n\n<diff>\n{diff}\n</diff>\n\n"
                        f"<description>\n{description}\n</description>")
 
@@ -151,12 +146,13 @@ class Harness:
                 (_PROMPTS / "review.md").read_text(),
                 message,
                 _TIMEOUT,
-                {"structured_output_model": ReviewVerdict},
+                structured_output_model=ReviewVerdict,
                 tools=[self.read_log],
             ).structured_output
 
         (self.out / "review.json").write_text(verdict.model_dump_json(indent=2))
         if verdict.safe:
+            run_url = "{GITHUB_SERVER_URL}/{GITHUB_REPOSITORY}/actions/runs/{GITHUB_RUN_ID}".format_map(os.environ)
             bot = f"Generated by autofix with `{_MODEL}` at {datetime.now(UTC):%Y-%m-%d %H:%M} UTC in {run_url}."
             (self.out / "pr.md").write_text(f"{description.strip()}\n\n{bot}\n\n{_LICENSE}\n")
         return verdict
@@ -166,7 +162,7 @@ class Harness:
         if not diff:
             return False
         runner = self.target.runner
-        added = [line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++ ")]
+        added = [line[1:] for line in diff.splitlines() if line.startswith("+")]
         text = "\n".join([*added, description])
         return (
             all(path == runner or (path.suffix == ".patch" and path.is_relative_to(runner.parent))

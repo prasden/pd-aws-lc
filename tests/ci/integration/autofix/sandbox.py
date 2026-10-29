@@ -15,7 +15,7 @@ from strands.sandbox.docker import DockerSandbox
 from .git import Git
 from .target import IntegrationTarget
 
-RUNNER_TIMEOUT = 3600
+_RUNNER_TIMEOUT = 3600
 _COMMAND_TIMEOUT = 120
 _READ_ONLY_PROGRAMS = {"grep", "ls", "cat", "head", "tail", "wc", "diff"}
 _GIT_READ_COMMANDS = {"log", "show", "diff", "blame", "grep", "ls-files"}
@@ -52,7 +52,7 @@ class Sandbox:
     def __init__(self, root: Path, target: IntegrationTarget, registry: str):
         """Clone aws-lc and the downstream repos at their failing commits, and set what the agent may edit.
 
-        Raise ValueError if this machine's arch has no failed job to replay.
+        Raise ValueError if this machine's arch has no failed job, since a replay of no jobs would pass.
         """
         self.jobs = target.on(platform.machine())
         if not self.jobs:
@@ -112,14 +112,13 @@ class Sandbox:
         return {"output": result.stdout, "error": result.stderr, "exit_code": result.exit_code}
 
     def _check(self, argv: list[str]) -> None:
-        """Raise ValueError unless the command is on the read-only allowlist."""
         match argv:
             case [program, *_] if program in _READ_ONLY_PROGRAMS:
                 return
             case ["git", "-C", repo, command, *args] if (
                     repo in self.git_repos and command in _GIT_READ_COMMANDS and not any(map(_runs_or_writes, args))):
                 return
-            case ["patch", *args] if "--dry-run" in args and "-e" not in args and "--ed" not in args:
+            case ["patch", *args] if "--dry-run" in args:
                 return
             case ["sed", "-n", script, _] if _SED_PRINT_RANGE.fullmatch(script):
                 return
@@ -127,16 +126,10 @@ class Sandbox:
 
     @cache
     def replay(self, diff: str) -> ReplayResult:
-        """Rerun this arch's failed CI jobs on a fresh aws-lc copy with the diff applied.
-
-        Downstream clones read the local repos. Results are cached by diff.
-        """
-        local_clones = {
-            f"url.file://{_CONTAINER_SRC / repo.name}.insteadOf": repo.url
-            for repo in self.target.repos
-        }
-
-        git_env = Git.config_env({"safe.directory": "*"} | local_clones)
+        """Rerun this arch's failed CI jobs on a fresh aws-lc copy with the diff applied and local downstream repos."""
+        git_env = Git.config_env({"safe.directory": "*"} | {
+            f"url.file://{_CONTAINER_SRC / repo.name}.insteadOf": repo.url for repo in self.target.repos
+        })
         copy = self.awslc.copy(self.root)
         copy.apply(diff)
         passed, reports = True, []
@@ -160,7 +153,7 @@ class Sandbox:
                     detach=True,
                 )
                 try:
-                    exit_code = container.wait(timeout=RUNNER_TIMEOUT)["StatusCode"]
+                    exit_code = container.wait(timeout=_RUNNER_TIMEOUT)["StatusCode"]
                     passed &= exit_code == 0
                     reports.append(f"{env.arch}/{env.image}: exit {exit_code}\n{container.logs().decode(errors='replace')}")
                 finally:

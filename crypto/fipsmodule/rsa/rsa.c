@@ -549,12 +549,12 @@ static int rsa_sign_raw_no_self_test(RSA *rsa, size_t *out_len, uint8_t *out,
     // and expect an |out_len| parameter. To remain compatible with this new
     // paradigm and OpenSSL, we initialize |out_len| based on the return value
     // here.
-    if (max_out > INT_MAX) {
+    if (in_len > INT_MAX) {
       OPENSSL_PUT_ERROR(RSA, ERR_R_OVERFLOW);
       *out_len = 0;
       return 0;
     }
-    int ret = rsa->meth->sign_raw((int)max_out, in, out, rsa, padding);
+    int ret = rsa->meth->sign_raw((int)in_len, in, out, rsa, padding);
     if(ret < 0) {
       *out_len = 0;
       return 0;
@@ -964,9 +964,9 @@ int RSA_verify(int hash_nid, const uint8_t *digest, size_t digest_len,
                                  rsa);
 }
 
-int RSA_verify_pss_mgf1(RSA *rsa, const uint8_t *digest, size_t digest_len,
+int rsa_verify_pss_mgf1(RSA *rsa, const uint8_t *digest, size_t digest_len,
                         const EVP_MD *md, const EVP_MD *mgf1_md, int salt_len,
-                        const uint8_t *sig, size_t sig_len) {
+                        int min_sLen, const uint8_t *sig, size_t sig_len) {
   SET_DIT_AUTO_RESET;
   if (digest_len != EVP_MD_size(md)) {
     OPENSSL_PUT_ERROR(RSA, RSA_R_INVALID_MESSAGE_LENGTH);
@@ -989,11 +989,19 @@ int RSA_verify_pss_mgf1(RSA *rsa, const uint8_t *digest, size_t digest_len,
     goto err;
   }
 
-  ret = RSA_verify_PKCS1_PSS_mgf1(rsa, digest, md, mgf1_md, em, salt_len);
+  ret = rsa_verify_PKCS1_PSS_mgf1(rsa, digest, md, mgf1_md, em, salt_len,
+                                  min_sLen);
 
 err:
   OPENSSL_free(em);
   return ret;
+}
+
+int RSA_verify_pss_mgf1(RSA *rsa, const uint8_t *digest, size_t digest_len,
+                        const EVP_MD *md, const EVP_MD *mgf1_md, int salt_len,
+                        const uint8_t *sig, size_t sig_len) {
+  return rsa_verify_pss_mgf1(rsa, digest, digest_len, md, mgf1_md, salt_len,
+                             RSA_PSS_NO_SALTLEN_MINIMUM, sig, sig_len);
 }
 
 int rsa_private_transform_no_self_test(RSA *rsa, uint8_t *out,

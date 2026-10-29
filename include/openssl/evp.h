@@ -707,10 +707,14 @@ OPENSSL_EXPORT int EVP_PKEY_derive_set_peer(EVP_PKEY_CTX *ctx, EVP_PKEY *peer);
 OPENSSL_EXPORT int EVP_PKEY_derive(EVP_PKEY_CTX *ctx, uint8_t *key,
                                    size_t *out_key_len);
 
-// EVP_PKEY_check supports EC and RSA keys and validates both the public and
-// private components of a key pair. For EC keys, it verifies that the private
-// key component exists and calls EC_KEY_check_key. For RSA keys, it calls
-// RSA_check_key which validates both public and private key relationships.
+// EVP_PKEY_check supports EC, RSA, and KEM keys and validates both the public
+// and private components of a key pair. For EC keys, it verifies that the
+// private key component exists and calls EC_KEY_check_key. For RSA keys, it
+// calls RSA_check_key which validates both public and private key
+// relationships. For KEM keys (e.g. ML-KEM), it requires the private key to be
+// present, validates both the public and private keys, and performs a Pairwise
+// Consistency Test (encapsulate then decapsulate) to confirm the keys form a
+// matching pair.
 //
 // It returns one on success and zero on error.
 OPENSSL_EXPORT int EVP_PKEY_check(EVP_PKEY_CTX *ctx);
@@ -721,6 +725,9 @@ OPENSSL_EXPORT int EVP_PKEY_check(EVP_PKEY_CTX *ctx);
 // For RSA keys, this calls |RSA_check_key| which requires the public and private
 // components of the key pair. This is different from OpenSSL which does not
 // support RSA keys via this API.
+// For KEM keys (e.g. ML-KEM), this validates the public key, and if the private
+// key is also present, validates it as well along with a Pairwise Consistency
+// Test. Unlike |EVP_PKEY_check|, the private key is not required.
 //
 // It returns one on success and zero on error.
 OPENSSL_EXPORT int EVP_PKEY_public_check(EVP_PKEY_CTX *ctx);
@@ -828,15 +835,29 @@ OPENSSL_EXPORT int EVP_PKEY_CTX_get_signature_md(EVP_PKEY_CTX *ctx,
                                                  const EVP_MD **out_md);
 
 
-// EVP_PKEY_CTX_set_signature_context sets |context| of length |context_len| to
+// EVP_PKEY_CTX_set1_signature_context_string sets |context| of length |context_len| to
 // be used as the context octet string for the signing operation. |context| will
 // be copied to an internal buffer allowing for the caller to free it
 // afterwards.
 //
-// EVP_PKEY_ED25519PH is the only key type that currently supports setting a
-// a signature context that is used in computing the HashEdDSA signature.
+// EVP_PKEY_ED25519PH and EVP_PKEY_PQDSA are the key types that currently
+// support setting a signature context. For Ed25519ph, the context is used in
+// computing the HashEdDSA signature. For ML-DSA (PQDSA), the context string is
+// used per FIPS 204 sections 5.2-5.3. The maximum context length is 255 bytes.
+// Note: for ML-DSA, the context string is only used with
+// |EVP_DigestSign|/|EVP_DigestVerify| (message signing). It is not permitted
+// and will return an error when using |EVP_PKEY_sign|/|EVP_PKEY_verify|
+// (digest signing), because the pre-hashed |mu| input already encodes the
+// context per FIPS 204 section 5.3.
 //
 // It returns one on success or zero on error.
+OPENSSL_EXPORT int EVP_PKEY_CTX_set1_signature_context_string(EVP_PKEY_CTX *ctx,
+                                                      const uint8_t *context,
+                                                      size_t context_len);
+
+// EVP_PKEY_CTX_set_signature_context is the previous name for
+// |EVP_PKEY_CTX_set1_signature_context_string|. It is retained for backward
+// compatibility.
 OPENSSL_EXPORT int EVP_PKEY_CTX_set_signature_context(EVP_PKEY_CTX *ctx,
                                                       const uint8_t *context,
                                                       size_t context_len);
@@ -845,8 +866,8 @@ OPENSSL_EXPORT int EVP_PKEY_CTX_set_signature_context(EVP_PKEY_CTX *ctx,
 // buffer containing the signing context octet string (which may be NULL) and
 // writes the length to |*context_len|.
 //
-// EVP_PKEY_ED25519PH is the only key type that currently supports retrieving a
-// a signature context that is used in computing the HashEdDSA signature.
+// EVP_PKEY_ED25519PH and EVP_PKEY_PQDSA are the key types that currently
+// support retrieving a signature context.
 //
 // It returns one on success or zero on error.
 OPENSSL_EXPORT int EVP_PKEY_CTX_get0_signature_context(EVP_PKEY_CTX *ctx,
@@ -867,16 +888,24 @@ OPENSSL_EXPORT int EVP_PKEY_CTX_get_rsa_padding(EVP_PKEY_CTX *ctx,
                                                 int *out_padding);
 
 // EVP_PKEY_CTX_set_rsa_pss_saltlen sets the length of the salt in a PSS-padded
-// signature. A value of -1 cause the salt to be the same length as the digest
-// in the signature. A value of -2 causes the salt to be the maximum length
-// that will fit when signing and recovered from the signature when verifying.
-// Otherwise the value gives the size of the salt in bytes.
+// signature. A value of |RSA_PSS_SALTLEN_DIGEST| (-1) causes the salt to be the
+// same length as the digest in the signature. A value of |RSA_PSS_SALTLEN_AUTO|
+// (-2) causes the salt to be the maximum length that will fit when signing and
+// recovered from the signature when verifying. Otherwise the value gives the
+// size of the salt in bytes.
 //
-// If unsure, use -1.
+// For |EVP_PKEY_RSA_PSS| keys that carry a restricted salt length, a value
+// below that minimum is rejected. |RSA_PSS_SALTLEN_AUTO| is allowed, but verify
+// then requires the recovered salt to be at least that minimum. Note OpenSSL
+// instead rejects |RSA_PSS_SALTLEN_AUTO| here for a verify operation, and so
+// accepts only a salt of exactly the minimum.
+//
+// If unsure, use |RSA_PSS_SALTLEN_DIGEST|.
 //
 // Returns one on success or zero on error.
 //
-// TODO(davidben): The default is currently -2. Switch it to -1.
+// TODO(davidben): The default is currently |RSA_PSS_SALTLEN_AUTO|. Switch it to
+// |RSA_PSS_SALTLEN_DIGEST|.
 OPENSSL_EXPORT int EVP_PKEY_CTX_set_rsa_pss_saltlen(EVP_PKEY_CTX *ctx,
                                                     int salt_len);
 
@@ -987,8 +1016,18 @@ OPENSSL_EXPORT EVP_PKEY *EVP_PKEY_kem_new_raw_key(int nid,
                                                   size_t len_secret);
 
 // EVP_PKEY_kem_check_key validates that the public key in |key| corresponds
-// to the secret key in |key|.
+// to the secret key in |key|, and that both encodings are well-formed. Both
+// halves of the key pair must be present. Prefer |EVP_PKEY_check| when a
+// private key is available, or |EVP_PKEY_public_check| for a public-only key.
 OPENSSL_EXPORT int EVP_PKEY_kem_check_key(EVP_PKEY *key);
+
+// EVP_PKEY_kem_get_type returns the |nid| of the configured KEM key in |pkey|.
+// If |pkey| is not of type |EVP_PKEY_KEM|, it returns 0 and pushes
+// |EVP_R_EXPECTING_A_KEM_KEY| onto the error queue. If |pkey| is of type
+// |EVP_PKEY_KEM| but has no underlying KEM key attached, it returns 0 and
+// pushes |EVP_R_NO_PARAMETERS_SET| onto the error queue. |pkey| must not be
+// NULL.
+OPENSSL_EXPORT int EVP_PKEY_kem_get_type(const EVP_PKEY *pkey);
 
 // PQDSA specific functions.
 
@@ -1063,6 +1102,18 @@ OPENSSL_EXPORT int EVP_PKEY_asn1_get0_info(int *ppkey_id, int *pkey_base_id,
                                            int *ppkey_flags, const char **pinfo,
                                            const char **ppem_str,
                                            const EVP_PKEY_ASN1_METHOD *ameth);
+
+// EVP_PKEY_get_private_seed returns the seed representation of the private key
+// for the key type configured in |key|. If |out| is NULL, it sets |*out_len| to
+// the size of the seed. Otherwise, it writes at most |*out_len| bytes to |out|
+// and sets |*out_len| to the number of bytes written.
+//
+// Return 1 on success and 0 otherwise.
+//
+// Note, the private key might not have a seed representation configured. In
+// this case, the operation is unsupported and 0 is returned.
+OPENSSL_EXPORT int EVP_PKEY_get_private_seed(const EVP_PKEY *key, uint8_t *out,
+  size_t *out_len);
 
 
 // EVP_PKEY_CTX keygen/paramgen functions.

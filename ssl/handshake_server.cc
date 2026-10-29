@@ -396,6 +396,12 @@ static bool is_probably_jdk11_with_tls13(const SSL_CLIENT_HELLO *client_hello) {
 static bool decrypt_ech(SSL_HANDSHAKE *hs, uint8_t *out_alert,
                         const SSL_CLIENT_HELLO *client_hello) {
   SSL *const ssl = hs->ssl;
+  if (SSL_is_dtls(ssl)) {
+    // ECH requires TLS 1.3, which has no DTLS counterpart in this library, so
+    // the extension carries no meaning here. |SSL_CTX_set1_ech_keys| rejects
+    // DTLS contexts, so there is nothing to decrypt with either.
+    return true;
+  }
   CBS body;
   if (!ssl_client_hello_get_extension(client_hello, &body,
                                       TLSEXT_TYPE_encrypted_client_hello)) {
@@ -605,6 +611,7 @@ static enum ssl_hs_wait_t do_read_client_hello_after_ech(SSL_HANDSHAKE *hs) {
   if (ssl->ctx->select_certificate_cb != NULL) {
     switch (ssl->ctx->select_certificate_cb(&client_hello)) {
       case ssl_select_cert_retry:
+        ERR_clear_error();
         return ssl_hs_certificate_selection_pending;
 
       case ssl_select_cert_error:
@@ -614,6 +621,10 @@ static enum ssl_hs_wait_t do_read_client_hello_after_ech(SSL_HANDSHAKE *hs) {
         return ssl_hs_error;
 
       default:
+        // The callback may have left stale errors on the error queue (e.g.
+        // from PEM parsing). Clear them so that SSL_get_error does not
+        // misinterpret them as handshake failures.
+        ERR_clear_error();
         /* fallthrough */;
     }
   }

@@ -47,6 +47,16 @@ OPENSSL_STATIC_ASSERT((sizeof((struct rand_thread_local_state*)0)->generate_call
 DEFINE_BSS_GET(struct rand_thread_local_state *, thread_states_list_head)
 DEFINE_STATIC_MUTEX(thread_local_states_list_lock)
 
+// thread_local_drbg_shutdown_started is set to a non-zero value during process
+// exit by |rand_thread_local_state_clear_all|, while the linked-list lock is
+// held. All reads and writes occur under |thread_local_states_list_lock|, so
+// no atomic accessors are needed; doing the check under the lock also avoids
+// the otherwise-racy window where a TLS destructor could observe the flag as
+// unset, then block on the lock while shutdown zeroization runs, and then
+// free a state whose |state_clear_lock| has been intentionally write-locked
+// forever.
+DEFINE_BSS_GET(int, thread_local_drbg_shutdown_started)
+
 #if defined(_MSC_VER)
 #pragma section(".CRT$XCU", read)
 static void rand_thread_local_state_clear_all(void);
@@ -67,19 +77,42 @@ static void rand_thread_local_state_clear_all(void) __attribute__ ((destructor))
 // randomness from a non-valid state. The linked application should obviously
 // arrange that all threads are gracefully exited before exiting the process.
 // Yet, in cases where such graceful exit does not happen we ensure that no
-// output can be returned by locking all thread-local states and deliberately
-// not releasing the lock. A synchronization step in the core randomness
-// generation routine |RAND_bytes_core| then ensures that no randomness
-// generation can occur after a thread-local state has been locked. It also
-// ensures |rand_thread_local_state_free| cannot free any thread state while we
-// own the lock.
+// output can be returned by locking each thread-local state's
+// |state_clear_lock| and deliberately not releasing it. A synchronization step
+// in the core randomness generation routine |RAND_bytes_core| then ensures
+// that no randomness generation can occur after a thread-local state has been
+// locked.
 //
-// When a thread-local DRBGs is gated from returning output, we can invoke the
+// We additionally set |thread_local_drbg_shutdown_started| under the
+// linked-list lock so that any thread which has not yet registered a
+// thread-local state cannot do so after this routine has begun zeroization;
+// without this, a fresh thread could allocate a state and bypass zeroization.
+// The linked-list lock itself is released at the end of this function. If we
+// instead held it forever, |thread_local_list_delete_node| (called from a
+// thread's TLS destructor in |rand_thread_local_state_free|) would block
+// indefinitely. On Windows, TLS destructors run under the loader lock, so
+// blocking there causes |ExitProcess| to hang waiting for the loader lock.
+// See https://github.com/aws/aws-lc/issues/3197.
+//
+// When a thread-local DRBG is gated from returning output, we can invoke the
 // entropy source zeroization from |state->entropy_source|. The entropy source
 // implementation can assume that any returned seed is never used to generate
 // any randomness that is later returned to a consumer.
 static void rand_thread_local_state_clear_all(void) {
   CRYPTO_STATIC_MUTEX_lock_write(thread_local_states_list_lock_bss_get());
+
+  // Idempotency guard. Under normal operation this routine runs exactly once
+  // (via |atexit|), but it is also exposed for testing via
+  // |rand_thread_local_state_clear_all_FOR_TESTING|, and re-running would
+  // attempt to write-lock per-state |state_clear_lock|s that are already held
+  // write-locked by the first invocation -- which is UB for a non-recursive
+  // rwlock.
+  if (*thread_local_drbg_shutdown_started_bss_get() != 0) {
+    CRYPTO_STATIC_MUTEX_unlock_write(thread_local_states_list_lock_bss_get());
+    return;
+  }
+  *thread_local_drbg_shutdown_started_bss_get() = 1;
+
   for (struct rand_thread_local_state *state = *thread_states_list_head_bss_get();
     state != NULL; state = state->next) {
     CRYPTO_MUTEX_lock_write(&state->state_clear_lock);
@@ -90,13 +123,34 @@ static void rand_thread_local_state_clear_all(void) {
     state != NULL; state = state->next) {
     state->entropy_source->methods->zeroize_thread(state->entropy_source);
   }
+
+  CRYPTO_STATIC_MUTEX_unlock_write(thread_local_states_list_lock_bss_get());
 }
 
-static void thread_local_list_delete_node(
+void rand_thread_local_state_clear_all_FOR_TESTING(void) {
+  rand_thread_local_state_clear_all();
+}
+
+// thread_local_list_delete_node removes |node_delete| from the global
+// linked list and returns 1. If process-wide shutdown zeroization has already
+// begun, the node is left in place and 0 is returned -- the caller must not
+// free the node in that case because |rand_thread_local_state_clear_all| has
+// write-locked its |state_clear_lock| and intentionally never releases it.
+static int thread_local_list_delete_node(
   struct rand_thread_local_state *node_delete) {
 
   // Mutating the global linked list. Need to synchronize over all threads.
   CRYPTO_STATIC_MUTEX_lock_write(thread_local_states_list_lock_bss_get());
+
+  // Re-check the shutdown flag under the lock. This makes the
+  // "free vs. shutdown-zeroize" decision atomic with respect to
+  // |rand_thread_local_state_clear_all|: either we delete and free before
+  // shutdown begins, or shutdown wins and we leak the node deliberately.
+  if (*thread_local_drbg_shutdown_started_bss_get() != 0) {
+    CRYPTO_STATIC_MUTEX_unlock_write(thread_local_states_list_lock_bss_get());
+    return 0;
+  }
+
   struct rand_thread_local_state *node_head = *thread_states_list_head_bss_get();
 
   // We have [node_delete->previous] <--> [node_delete] <--> [node_delete->next]
@@ -127,6 +181,7 @@ static void thread_local_list_delete_node(
   }
 
   CRYPTO_STATIC_MUTEX_unlock_write(thread_local_states_list_lock_bss_get());
+  return 1;
 }
 
 // thread_local_list_add adds the state |node_add| to the linked list. Note that
@@ -140,6 +195,19 @@ static void thread_local_list_add_node(
 
   // Mutating the global linked list. Need to synchronize over all threads.
   CRYPTO_STATIC_MUTEX_lock_write(thread_local_states_list_lock_bss_get());
+
+  // If process-wide zeroization has already started, do not add a new state to
+  // the list -- it would not have been zeroized by
+  // |rand_thread_local_state_clear_all|. Instead, write-lock the state's
+  // |state_clear_lock| and never release it. This causes any subsequent
+  // |RAND_bytes_core| call on this thread to block forever on the read lock,
+  // matching the FIPS-derived guarantee that no output is returned after
+  // shutdown zeroization.
+  if (*thread_local_drbg_shutdown_started_bss_get() != 0) {
+    CRYPTO_MUTEX_lock_write(&node_add->state_clear_lock);
+    CRYPTO_STATIC_MUTEX_unlock_write(thread_local_states_list_lock_bss_get());
+    return;
+  }
 
   // First get a reference to the pointer of the head of the linked list.
   // That is, the pointer to the head node node_head is *thread_states_head.
@@ -171,7 +239,16 @@ static void rand_thread_local_state_free(void *state_in) {
     return;
   }
 
-  thread_local_list_delete_node(state);
+  // If process-wide shutdown zeroization has begun, the per-state
+  // |state_clear_lock| has been write-locked and is intentionally never
+  // released (so any in-flight |RAND_bytes| call cannot return output from a
+  // zeroized state). |thread_local_list_delete_node| therefore detects this
+  // case under the linked-list lock and refuses to delete; we must then leak
+  // the node, since freeing it would destroy a held mutex. The OS reclaims
+  // the memory at process exit. See issue #3197.
+  if (thread_local_list_delete_node(state) == 0) {
+    return;
+  }
 
   // Potentially, something could kill the thread before an entropy source has
   // been associated to the thread-local randomness generator object.
@@ -215,17 +292,24 @@ static int rand_ensure_valid_state(const struct rand_thread_local_state *state) 
 // to ensure uniqueness.
 //
 // Note: If |rand_check_ctr_drbg_uniqueness| returns 0 it does not necessarily
-// imply that an UBE occurred. It can also mean that no UBE detection is
-// supported or that UBE detection failed. In these cases, |state| must also be
-// randomized to ensure uniqueness. Any special future cases can be handled in
-// this function.
+// imply that an UBE occurred. For a state that is not fresh it can also mean
+// that no UBE detection is supported or that UBE detection failed. In these
+// cases, |state| must also be randomized to ensure uniqueness. Any special
+// future cases can be handled in this function.
+//
+// If the state has just been initialized, then |ctr_drbg_state_is_fresh| is 1.
+// Otherwise, 0.
 //
 // Return 0 if |state| must be randomized. 1 otherwise.
-static int rand_check_ctr_drbg_uniqueness(struct rand_thread_local_state *state) {
+static int rand_check_ctr_drbg_uniqueness(
+  struct rand_thread_local_state *state, int ctr_drbg_state_is_fresh) {
 
   uint64_t current_generation_number = 0;
   if (CRYPTO_get_ube_generation_number(&current_generation_number) != 1) {
-    return 0;
+    // UBE detection is unavailable or failed, so we cannot know whether an UBE
+    // occurred. A freshly initialized state sourced its seed material moments
+    // ago and is therefore unique. Any other state must be randomized.
+    return ctr_drbg_state_is_fresh == 1 ? 1 : 0;
   }
 
   if (current_generation_number != state->generation_number) {
@@ -320,6 +404,25 @@ static void rand_state_initialize(struct rand_thread_local_state *state) {
 
   GUARD_PTR_ABORT(state);
 
+  // Associate |state| with an UBE generation number sampled before any entropy
+  // that seeds it is sourced. Otherwise, an UBE occurring between sourcing that
+  // entropy and sampling the generation number would associate |state| with a
+  // post-UBE generation number while its seed material predates the UBE.
+  //
+  // The sample must precede |get_entropy_source| as well, not just the seed
+  // draw below. An entropy source's |initialize| may itself derive material
+  // that the seed draw is a deterministic function of, as the tree DRBG does
+  // in |tree_jitter_initialize|. Sampling first means |state| is bound to a
+  // generation number predating all of it, so a UBE anywhere in between forces
+  // a reseed here, without relying on the entropy source to detect the UBE on
+  // its own behalf.
+  uint64_t current_generation_number = 0;
+  if (CRYPTO_get_ube_generation_number(&current_generation_number) != 1) {
+    state->generation_number = 0;
+  } else {
+    state->generation_number = current_generation_number;
+  }
+
   state->entropy_source = get_entropy_source();
   if (state->entropy_source == NULL) {
     abort();
@@ -341,12 +444,6 @@ static void rand_state_initialize(struct rand_thread_local_state *state) {
 
   state->reseed_calls_since_initialization = 0;
   state->generate_calls_since_seed = 0;
-  uint64_t current_generation_number = 0;
-  if (CRYPTO_get_ube_generation_number(&current_generation_number) != 1) {
-    state->generation_number = 0;
-  } else {
-    state->generation_number = current_generation_number;
-  }
   CRYPTO_MUTEX_init(&state->state_clear_lock);
 
   OPENSSL_cleanse(seed, CTR_DRBG_ENTROPY_LEN);
@@ -377,10 +474,8 @@ static void rand_bytes_core(
   // CTR-DRBG generate function CTR_DRBG_generate().
   int must_reseed_before_generate = 0;
 
-  // Ensure that the CTR-DRBG state is unique. If the state is fresh then
-  // uniqueness is guaranteed.
-  if (rand_check_ctr_drbg_uniqueness(state) != 1 &&
-      ctr_drbg_state_is_fresh != 1) {
+  // Ensure that the CTR-DRBG state is unique.
+  if (rand_check_ctr_drbg_uniqueness(state, ctr_drbg_state_is_fresh) != 1) {
     must_reseed_before_generate = 1;
   }
 

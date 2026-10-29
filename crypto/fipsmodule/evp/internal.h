@@ -68,6 +68,7 @@ struct evp_pkey_asn1_method_st {
   int (*set_pub_raw)(EVP_PKEY *pkey, const uint8_t *in, size_t len);
   int (*get_priv_raw)(const EVP_PKEY *pkey, uint8_t *out, size_t *out_len);
   int (*get_pub_raw)(const EVP_PKEY *pkey, uint8_t *out, size_t *out_len);
+  int (*get_priv_seed)(const EVP_PKEY *pkey, uint8_t *out, size_t *out_len);
 
   // pkey_opaque returns 1 if the |pk| is opaque. Opaque keys are backed by
   // custom implementations which do not expose key material and parameters.
@@ -154,8 +155,6 @@ int EVP_RSA_PKEY_CTX_ctrl(EVP_PKEY_CTX *ctx, int optype, int cmd, int p1, void *
 
 #define EVP_PKEY_CTRL_MD 1
 #define EVP_PKEY_CTRL_GET_MD 2
-#define EVP_PKEY_CTRL_SIGNING_CONTEXT 3
-#define EVP_PKEY_CTRL_GET_SIGNING_CONTEXT 4
 
 // EVP_PKEY_CTRL_PEER_KEY is called with different values of |p1|:
 //   0: Is called from |EVP_PKEY_derive_set_peer| and |p2| contains a peer key.
@@ -197,6 +196,12 @@ int EVP_RSA_PKEY_CTX_ctrl(EVP_PKEY_CTX *ctx, int optype, int cmd, int p1, void *
 #define EVP_PKEY_CTRL_DSA_PARAMGEN_BITS (EVP_PKEY_ALG_CTRL + 23)
 #define EVP_PKEY_CTRL_DSA_PARAMGEN_Q_BITS (EVP_PKEY_ALG_CTRL + 24)
 #define EVP_PKEY_CTRL_DSA_PARAMGEN_MD (EVP_PKEY_ALG_CTRL + 25)
+
+// These must not reuse |EVP_PKEY_CTRL_PEER_KEY|. EC (and other derive
+// algorithms) treat that command as a successful no-op, so a colliding
+// signing-context command would be silently ignored on ECDSA.
+#define EVP_PKEY_CTRL_SIGNING_CONTEXT (EVP_PKEY_ALG_CTRL + 26)
+#define EVP_PKEY_CTRL_GET_SIGNING_CONTEXT (EVP_PKEY_ALG_CTRL + 27)
 
 // EVP_PKEY_CTX_KEYGEN_INFO_COUNT is the maximum array length for
 // |EVP_PKEY_CTX->keygen_info|. The array length corresponds to the number of

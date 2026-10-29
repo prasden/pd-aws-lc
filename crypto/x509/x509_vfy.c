@@ -11,6 +11,7 @@
 #include <openssl/evp.h>
 #include <openssl/mem.h>
 #include <openssl/obj.h>
+#include <openssl/sha.h>
 #include <openssl/thread.h>
 #include <openssl/x509.h>
 
@@ -21,20 +22,42 @@ static CRYPTO_EX_DATA_CLASS g_ex_data_class =
     CRYPTO_EX_DATA_CLASS_INIT_WITH_APP_DATA;
 
 // CRL score values
+//
+// The bit layout below is carefully chosen so that a numerical comparison
+// against |CRL_SCORE_VALID| is equivalent to "NOCRITICAL, SCOPE, and TIME
+// are all set." For that to hold, the sum of every bit strictly below TIME
+// (ISSUER_NAME | ISSUER_CERT | SAME_PATH | AKID) must be less than TIME,
+// TIME must be less than SCOPE, and SCOPE less than NOCRITICAL. Preserve
+// this invariant when adjusting these values.
 
 // No unhandled critical extensions
-#define CRL_SCORE_NOCRITICAL 0x100
+#define CRL_SCORE_NOCRITICAL 0x200
 
 // certificate is within CRL scope
-#define CRL_SCORE_SCOPE 0x080
+#define CRL_SCORE_SCOPE 0x100
 
 // CRL times valid
-#define CRL_SCORE_TIME 0x040
+#define CRL_SCORE_TIME 0x080
+
+// CRL's IDP specifically matches the certificate's CRLDP. Always set
+// alongside CRL_SCORE_SCOPE; refines a broad in-scope match into a
+// specific one so a specific-IDP CRL outranks a broad no-IDP CRL of
+// equal freshness. 
+//
+// This bit is placed strictly below CRL_SCORE_TIME 
+// so that an invalid specific-IDP CRL cannot win over a valid broad CRL. 
+// A specific-IDP CRL must still be fresh (TIME) and free of unhandled critical 
+// extensions (NOCRITICAL) to qualify as valid.
+#define CRL_SCORE_IDP_MATCH 0x040
 
 // Issuer name matches certificate
 #define CRL_SCORE_ISSUER_NAME 0x020
 
-// If this score or above CRL is probably valid
+// If this score or above CRL is probably valid.
+//
+// CRL_SCORE_IDP_MATCH is intentionally excluded: a specific-IDP CRL that
+// is missing NOCRITICAL or TIME must not be considered valid on the basis
+// of its scope match alone.
 #define CRL_SCORE_VALID \
   (CRL_SCORE_NOCRITICAL | CRL_SCORE_TIME | CRL_SCORE_SCOPE)
 
@@ -55,6 +78,7 @@ static int check_id(X509_STORE_CTX *ctx);
 static int check_trust(X509_STORE_CTX *ctx);
 static int check_revocation(X509_STORE_CTX *ctx);
 static int check_cert(X509_STORE_CTX *ctx);
+static int check_blocked_spki(X509_STORE_CTX *ctx);
 static int check_policy(X509_STORE_CTX *ctx);
 
 static int get_issuer(X509 **issuer, X509_STORE_CTX *ctx, X509 *x);
@@ -63,7 +87,7 @@ static int get_crl_score(X509_STORE_CTX *ctx, X509 **pissuer, X509_CRL *crl,
 static int get_crl(X509_STORE_CTX *ctx, X509_CRL **pcrl, X509 *x);
 static int crl_akid_check(X509_STORE_CTX *ctx, X509_CRL *crl, X509 **pissuer,
                           int *pcrl_score);
-static int crl_crldp_check(X509 *x, X509_CRL *crl, int crl_score);
+static int crl_crldp_check(X509 *x, X509_CRL *crl, int crl_score, int *idp_match);
 static int cert_crl(X509_STORE_CTX *ctx, X509_CRL *crl, X509 *x);
 
 static int internal_verify(X509_STORE_CTX *ctx);
@@ -424,6 +448,11 @@ int X509_verify_cert(X509_STORE_CTX *ctx) {
   // Check revocation status: we do this after copying parameters because
   // they may be needed for CRL signature verification.
   ok = check_revocation(ctx);
+  if (!ok) {
+    goto end;
+  }
+
+  ok = check_blocked_spki(ctx);
   if (!ok) {
     goto end;
   }
@@ -905,6 +934,105 @@ err:
   return ok;
 }
 
+// blocked_spkis contains the SHA-256 digests of the DER-encoded
+// SubjectPublicKeyInfos that are rejected regardless of revocation or trust
+// configuration. For more information, see:
+//  - https://github.com/aws/aws-lc/issues/3679
+//  - P542986882
+//
+// Every entry below is a P-384 key, whose SubjectPublicKeyInfo encodes to
+// |blocked_spki_len| bytes, which lets keys of any other size skip the digest.
+// If entries encoding to a different length are needed at some point, this
+// needs another implementation.
+static const int blocked_spki_len = 120;
+
+static const uint8_t blocked_spkis[][SHA256_DIGEST_LENGTH] = {
+    {0x43, 0xbf, 0xfa, 0x19, 0xd6, 0xef, 0x65, 0x14, 0x51, 0xf6, 0x84,
+     0x1e, 0x01, 0x99, 0x31, 0xe9, 0x6f, 0x6f, 0x2e, 0xae, 0xff, 0x28,
+     0xab, 0x4b, 0x6f, 0x1c, 0xe4, 0x57, 0x6d, 0xe2, 0x71, 0x7b},
+    {0x49, 0xdd, 0x35, 0x3d, 0xc2, 0xb9, 0x19, 0xa3, 0x77, 0x06, 0x45,
+     0x11, 0x7d, 0x0e, 0x60, 0xc1, 0x61, 0x15, 0xe7, 0xd1, 0xbc, 0x25,
+     0x9e, 0xef, 0xe7, 0x34, 0xb0, 0x0e, 0xa4, 0x34, 0xfe, 0x5f},
+    {0x5c, 0x06, 0x60, 0xa2, 0xb1, 0x64, 0x91, 0x0d, 0x8f, 0xf5, 0x89,
+     0xc1, 0x8e, 0x14, 0x55, 0x2e, 0x9e, 0x0e, 0xc2, 0x37, 0xdc, 0xef,
+     0xe2, 0xcb, 0x73, 0x6d, 0x41, 0xa4, 0x81, 0x1f, 0x81, 0xa0},
+    {0x63, 0xec, 0xef, 0xee, 0x43, 0x1d, 0x49, 0x52, 0x3b, 0xc1, 0x13,
+     0x6c, 0x4e, 0x72, 0xd0, 0x20, 0x6a, 0x47, 0x70, 0x86, 0xca, 0xf6,
+     0x06, 0xcd, 0x5c, 0xf0, 0x25, 0x68, 0x6c, 0x10, 0x9c, 0xf8},
+    {0x92, 0xc0, 0x63, 0xd6, 0x7e, 0x8f, 0x14, 0xdb, 0x71, 0xd2, 0x88,
+     0xe1, 0x12, 0x66, 0xff, 0xda, 0xf6, 0x9c, 0xbf, 0x11, 0x5f, 0x7b,
+     0xab, 0x14, 0xf3, 0xbc, 0x2f, 0x68, 0xd2, 0x5e, 0x0e, 0x30},
+    {0xe0, 0x25, 0x4c, 0x7f, 0xcd, 0xc2, 0x65, 0xe2, 0xf0, 0xf8, 0xa4,
+     0x28, 0xda, 0xbb, 0x75, 0xab, 0x4a, 0xe0, 0x39, 0xb4, 0x87, 0x2d,
+     0x62, 0xf5, 0xee, 0x57, 0xf0, 0x87, 0x7d, 0x5a, 0x8a, 0x41},
+    {0xeb, 0xed, 0x64, 0x75, 0xc2, 0xc2, 0xd8, 0x0f, 0xcb, 0x19, 0x9f,
+     0x3f, 0xe8, 0xdd, 0x6e, 0x6b, 0x3c, 0xe6, 0x0b, 0x77, 0xeb, 0x15,
+     0xd4, 0xe4, 0x2c, 0x3d, 0xec, 0x0c, 0x6f, 0x5b, 0x51, 0x05},
+    {0xec, 0x4f, 0xfa, 0x1a, 0xd0, 0xac, 0x88, 0x08, 0x13, 0x14, 0xb7,
+     0xaa, 0xff, 0xef, 0x6a, 0x91, 0xf9, 0x7c, 0xd5, 0x72, 0x91, 0xbb,
+     0x5b, 0xa6, 0x86, 0xc5, 0x41, 0x5f, 0x5e, 0xb4, 0xf6, 0xb6},
+};
+
+// spki_is_blocked sets |*out_blocked| to one if the public key of |x| is in
+// |blocked_spkis| and to zero otherwise. It returns one on success and zero if
+// the public key could not be marshalled.
+static int spki_is_blocked(const X509 *x, int *out_blocked) {
+  *out_blocked = 0;
+  X509_PUBKEY *pubkey = X509_get_X509_PUBKEY(x);
+  if (pubkey == NULL) {
+    return 0;
+  }
+  // Ask for the length first. Nothing of a different size can match, so most
+  // keys never need to be marshalled or hashed.
+  int spki_len = i2d_X509_PUBKEY(pubkey, NULL);
+  if (spki_len <= 0) {
+    return 0;
+  }
+  if (spki_len != blocked_spki_len) {
+    return 1;
+  }
+
+  uint8_t *spki = NULL;
+  if (i2d_X509_PUBKEY(pubkey, &spki) != spki_len) {
+    OPENSSL_free(spki);
+    return 0;
+  }
+  uint8_t spki_hash[SHA256_DIGEST_LENGTH];
+  SHA256(spki, (size_t)spki_len, spki_hash);
+  OPENSSL_free(spki);
+
+  for (size_t i = 0; i < OPENSSL_ARRAY_SIZE(blocked_spkis); i++) {
+    if (OPENSSL_memcmp(spki_hash, blocked_spkis[i], SHA256_DIGEST_LENGTH) ==
+        0) {
+      *out_blocked = 1;
+      break;
+    }
+  }
+  return 1;
+}
+
+// check_blocked_spki rejects chains containing a certificate whose public key
+// is in |blocked_spkis|.
+static int check_blocked_spki(X509_STORE_CTX *ctx) {
+  for (size_t i = 0; i < sk_X509_num(ctx->chain); i++) {
+    X509 *x = sk_X509_value(ctx->chain, i);
+    int blocked;
+    if (!spki_is_blocked(x, &blocked)) {
+      ctx->error = X509_V_ERR_OUT_OF_MEM;
+      return 0;
+    }
+    if (blocked) {
+      ctx->current_cert = x;
+      ctx->error_depth = (int)i;
+      ctx->error = X509_V_ERR_CERT_REVOKED;
+      if (!call_verify_cb(0, ctx)) {
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
 // Check CRL times against values in X509_STORE_CTX
 static int check_crl_time(X509_STORE_CTX *ctx, X509_CRL *crl, int notify) {
   if (ctx->param->flags & X509_V_FLAG_NO_CHECK_TIME) {
@@ -1058,11 +1186,13 @@ static int get_crl_score(X509_STORE_CTX *ctx, X509 **pissuer, X509_CRL *crl,
     return 0;
   }
 
-  // Check cert for matching CRL distribution points
-  if (crl_crldp_check(x, crl, crl_score)) {
+  int idp_match = 0;
+  if (crl_crldp_check(x, crl, crl_score, &idp_match)) {
     crl_score |= CRL_SCORE_SCOPE;
+    if (idp_match) {
+      crl_score |= CRL_SCORE_IDP_MATCH;
+    }
   }
-
   return crl_score;
 }
 
@@ -1099,61 +1229,23 @@ static int crl_akid_check(X509_STORE_CTX *ctx, X509_CRL *crl, X509 **pissuer,
   return 0;
 }
 
-// Check for match between two dist point names: three separate cases. 1.
-// Both are relative names and compare X509_NAME types. 2. One full, one
-// relative. Compare X509_NAME to GENERAL_NAMES. 3. Both are full names and
-// compare two GENERAL_NAMES. 4. One is NULL: automatic match.
+// Check for a match between two distribution point names. A NULL name matches
+// anything.
 static int idp_check_dp(DIST_POINT_NAME *a, DIST_POINT_NAME *b) {
-  X509_NAME *nm = NULL;
-  GENERAL_NAMES *gens = NULL;
   GENERAL_NAME *gena, *genb;
   size_t i, j;
   if (!a || !b) {
     return 1;
   }
-  if (a->type == 1) {
-    if (!a->dpname) {
-      return 0;
-    }
-    // Case 1: two X509_NAME
-    if (b->type == 1) {
-      if (!b->dpname) {
-        return 0;
-      }
-      if (!X509_NAME_cmp(a->dpname, b->dpname)) {
-        return 1;
-      } else {
-        return 0;
-      }
-    }
-    // Case 2: set name and GENERAL_NAMES appropriately
-    nm = a->dpname;
-    gens = b->name.fullname;
-  } else if (b->type == 1) {
-    if (!b->dpname) {
-      return 0;
-    }
-    // Case 2: set name and GENERAL_NAMES appropriately
-    gens = a->name.fullname;
-    nm = b->dpname;
-  }
-
-  // Handle case 2 with one GENERAL_NAMES and one X509_NAME
-  if (nm) {
-    for (i = 0; i < sk_GENERAL_NAME_num(gens); i++) {
-      gena = sk_GENERAL_NAME_value(gens, i);
-      if (gena->type != GEN_DIRNAME) {
-        continue;
-      }
-      if (!X509_NAME_cmp(nm, gena->d.directoryName)) {
-        return 1;
-      }
-    }
+  // We only support fullName, not nameRelativeToCRLIssuer. The latter is
+  // discouraged by RFC 5280, and expanding it eagerly allowed excessive memory
+  // use.
+  if (a->type != 0 || b->type != 0) {
     return 0;
   }
-
-  // Else case 3: two GENERAL_NAMES
-
+  // Check that the CRL's distributionPoint has some name in common with the
+  // certificate's. A CA might shard across multiple CRLs. This check ensures we
+  // are looking at the right shard.
   for (i = 0; i < sk_GENERAL_NAME_num(a->name.fullname); i++) {
     gena = sk_GENERAL_NAME_value(a->name.fullname, i);
     for (j = 0; j < sk_GENERAL_NAME_num(b->name.fullname); j++) {
@@ -1169,7 +1261,7 @@ static int idp_check_dp(DIST_POINT_NAME *a, DIST_POINT_NAME *b) {
 
 // Check CRLDP and IDP. Return true when the CRL is a good
 // candidate CRL from which to check revocation of the certificate.
-static int crl_crldp_check(X509 *x, X509_CRL *crl, int crl_score) {
+static int crl_crldp_check(X509 *x, X509_CRL *crl, int crl_score, int *idp_match) {
   if (crl->idp_flags & IDP_ONLYATTR) {
     return 0;
   }
@@ -1198,7 +1290,12 @@ static int crl_crldp_check(X509 *x, X509_CRL *crl, int crl_score) {
     // the certificate issuer (and set CRL_SCORE_ISSUER_NAME);
 
     // RFC 5280 Section 6.3.3 step b.2
-    if (!crl->idp || idp_check_dp(dp->distpoint, crl->idp->distpoint)){
+
+    // A CRL with a specific IDP match will be preferred
+    // over a broad no-IDP/empty-IDP match.
+    if (crl->idp && crl->idp->distpoint &&
+        idp_check_dp(dp->distpoint, crl->idp->distpoint)) {
+      *idp_match = 1;
       return 1;
     }
   }
@@ -1206,13 +1303,13 @@ static int crl_crldp_check(X509 *x, X509_CRL *crl, int crl_score) {
   // If the CRL does not specify an issuing distribution point, allow it to
   // match anything.
   // RFC5280 section 6.3.3 check (b).(2) does not prescribe what to do if the
-  // CRL does not include an IDP. This fallback returns true if the CRL did not
-  // include an IDP or an IDP without a DP. Such a CRL could still be a good
-  // candidate CRL to check against although we cannot check if it matches the
-  // DP in the certificate. In the event of multiple good candidate CRLs
-  // (crl_crldp_check() returns 1 and get_crl_score() scores them high), some
-  // without an IDP or with an IDP and without a DP and others matching the
-  // certificate's DP, get_crl_sk() will pick the freshest one.
+  // CRL does not include an IDP. This fallback returns CRL_SCORE_SCOPE (broad
+  // match) if the CRL did not include an IDP or an IDP without a DP. Such a
+  // CRL could still be a good candidate CRL to check against although we
+  // cannot check if it matches the DP in the certificate. A CRL with a
+  // specific IDP match receives (CRL_SCORE_SCOPE | CRL_SCORE_IDP_MATCH), so it will be preferred
+  // over a broad match. Among CRLs with the same scope class, get_crl_sk()
+  // will pick the freshest one.
   return !crl->idp || !crl->idp->distpoint;
 }
 

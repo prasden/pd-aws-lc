@@ -19,6 +19,40 @@ cd $SRC_ROOT
 BUILD_ROOT="${SRC_ROOT}/test_build_dir"
 echo BUILD_ROOT="$BUILD_ROOT"
 
+INTEGRATION_FAILURE_FILE="${SRC_ROOT}/integration-failure.txt"
+
+# Create the failure artifact with the integration name, optional version, and AWS-LC commit.
+# Example: run_python_integration.sh 3.13 records "python<TAB>3.13".
+function record_integration() {
+  local runner="${1##*/}"
+  local integration="${runner#run_}"
+  integration="${integration%_integration.sh}"
+  printf '%s\t%s\nawslc_sha=%s\n' \
+    "${integration}" "${2:-}" "${GITHUB_SHA:-}" > "${INTEGRATION_FAILURE_FILE}"
+}
+
+# Append the cloned repository's URL and exact commit to the failure artifact.
+# A URL is required only for repositories without an origin remote.
+function record_repo_commit() {
+  local dir="$1"
+  local url="${2:-}"
+  local sha
+
+  if [[ -z "${url}" ]]; then
+    url="$(git -C "${dir}" remote get-url origin)" || return 1
+  fi
+  sha="$(git -C "${dir}" rev-parse HEAD)" || return 1
+  printf 'commit=%s %s\n' "${url}" "${sha}" >> "${INTEGRATION_FAILURE_FILE}"
+}
+
+# Every integration runner sources this setup file when it starts, so BASH_SOURCE[1]
+# identifies the integration runner and automatically records its name, version, and AWS-LC commit.
+# Build and setup scripts are skipped so unrelated CI jobs do not create artifacts.
+integration_runner="${BASH_SOURCE[1]:-}"
+if [[ "${integration_runner##*/}" == run_*_integration.sh ]]; then
+  record_integration "${integration_runner}" "${1:-}"
+fi
+
 PLATFORM=$(uname -m)
 
 NUM_CPU_THREADS=''
@@ -54,7 +88,7 @@ function run_build {
   mkdir -p "$BUILD_ROOT"
   cd "$BUILD_ROOT" || exit 1
 
-  if [[ "${AWSLC_32BIT}" == "1" ]]; then
+  if [[ "${AWSLC_32BIT:-0}" == "1" ]]; then
     cflags+=("-DCMAKE_TOOLCHAIN_FILE=${SRC_ROOT}/util/32-bit-toolchain.cmake")
   fi
 
@@ -140,17 +174,29 @@ function fips_build_and_test {
   run_build "$@" -DFIPS=1
   # Upon completion of the build process. The module’s status can be verified by 'tool/bssl isfips'.
   # https://csrc.nist.gov/CSRC/media/projects/cryptographic-module-validation-program/documents/security-policies/140sp3678.pdf
-  # FIPS mode is enabled when 'defined(BORINGSSL_FIPS) && !defined(OPENSSL_ASAN)'.
-  # https://github.com/aws/aws-lc/blob/220e266d4e415cf0101388b89a2bd855e0e4e203/crypto/fipsmodule/is_fips.c#L22
+  # FIPS mode is enabled when 'defined(BORINGSSL_FIPS) && !defined(OPENSSL_ASAN) && !defined(OPENSSL_MSAN)'.
   expect_fips_mode=1
   for build_flag in "$@"
   do
-    if [[ "${build_flag}" == '-DASAN=1' ]]; then
+    if [[ "${build_flag}" == '-DASAN=1' || "${build_flag}" == '-DMSAN=1' ]]; then
       expect_fips_mode=0
       break
     fi
   done
-  module_status=$("${BUILD_ROOT}/tool/bssl" isfips)
+  # Locate the bssl tool. ENABLE_DIST_PKG builds set COHABITANT_BINARIES, which
+  # prefixes the tool name (e.g. aws-lc-bssl), so check both names.
+  bssl_tool=""
+  for candidate in "${BUILD_ROOT}/tool/bssl" "${BUILD_ROOT}/tool/aws-lc-bssl"; do
+    if [[ -x "${candidate}" ]]; then
+      bssl_tool="${candidate}"
+      break
+    fi
+  done
+  if [[ -z "${bssl_tool}" ]]; then
+    echo >&2 "bssl tool not found under ${BUILD_ROOT}/tool (looked for bssl and aws-lc-bssl)."
+    exit 1
+  fi
+  module_status=$("${bssl_tool}" isfips)
   [[ "${expect_fips_mode}" == "${module_status}" ]] || { echo >&2 "FIPS Mode validation failed."; exit 1; }
   # Run tests.
   run_cmake_custom_target 'run_tests'

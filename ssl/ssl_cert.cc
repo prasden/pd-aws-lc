@@ -253,6 +253,14 @@ static int cert_set_chain_and_key(
     cert_pkey->chain.reset();
   }
   cert_pkey->chain = std::move(certs);
+
+  // Invalidate the parsed X509 leaf and chain caches since the backing
+  // CRYPTO_BUFFER chain was just replaced. Dispatch through |x509_method| to
+  // respect the abstraction boundary and to correctly handle the noop case
+  // (e.g. TLS_with_buffers_method) where these are no-ops.
+  cert->x509_method->cert_flush_cached_chain(cert);
+  cert->x509_method->cert_flush_leaf(cert);
+
   cert->cert_private_key_idx = slot_idx;
 
   return 1;
@@ -295,6 +303,10 @@ bool ssl_set_cert(CERT *cert, UniquePtr<CRYPTO_BUFFER> buffer) {
   if (cert_pkey.chain != nullptr) {
     CRYPTO_BUFFER_free(sk_CRYPTO_BUFFER_value(cert_pkey.chain.get(), 0));
     sk_CRYPTO_BUFFER_set(cert_pkey.chain.get(), 0, buffer.release());
+
+    // The backing CRYPTO_BUFFER leaf was just replaced; invalidate the cached
+    // X509 leaf to prevent stale data from being returned to callers.
+    cert->x509_method->cert_flush_leaf(cert);
 
     // Update certificate slot index if all checks have passed.
     cert->cert_private_key_idx = slot_index;
@@ -1163,3 +1175,63 @@ int SSL_delegated_credential_used(const SSL *ssl) {
 int SSL_CTX_get_security_level(const SSL_CTX *ctx) { return 0; }
 
 void SSL_CTX_set_security_level(const SSL_CTX *ctx, int level) {}
+
+int SSL_get_security_level(const SSL *ssl) { return 0; }
+
+void SSL_set_security_level(const SSL *ssl, int level) {}
+
+void SSL_CTX_set_security_callback(SSL_CTX *ctx, SSL_security_callback cb) {
+  if (ctx == nullptr) {
+    return;
+  }
+  ctx->security_callback = cb;
+}
+
+SSL_security_callback SSL_CTX_get_security_callback(const SSL_CTX *ctx) {
+  if (ctx == nullptr) {
+    return nullptr;
+  }
+  return ctx->security_callback;
+}
+
+void SSL_CTX_set0_security_ex_data(SSL_CTX *ctx, void *ex) {
+  if (ctx == nullptr) {
+    return;
+  }
+  ctx->security_callback_ex_data = ex;
+}
+
+void *SSL_CTX_get0_security_ex_data(const SSL_CTX *ctx) {
+  if (ctx == nullptr) {
+    return nullptr;
+  }
+  return ctx->security_callback_ex_data;
+}
+
+void SSL_set_security_callback(SSL *ssl, SSL_security_callback cb) {
+  if (ssl == nullptr) {
+    return;
+  }
+  ssl->security_callback = cb;
+}
+
+SSL_security_callback SSL_get_security_callback(const SSL *ssl) {
+  if (ssl == nullptr) {
+    return nullptr;
+  }
+  return ssl->security_callback;
+}
+
+void SSL_set0_security_ex_data(SSL *ssl, void *ex) {
+  if (ssl == nullptr) {
+    return;
+  }
+  ssl->security_callback_ex_data = ex;
+}
+
+void *SSL_get0_security_ex_data(const SSL *ssl) {
+  if (ssl == nullptr) {
+    return nullptr;
+  }
+  return ssl->security_callback_ex_data;
+}

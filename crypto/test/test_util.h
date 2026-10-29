@@ -64,6 +64,10 @@ std::string EncodeHex(bssl::Span<const uint8_t> in);
 // |X509*|.
 bssl::UniquePtr<X509> CertFromPEM(const char *pem);
 
+// CertChainFromPEM parses every PEM-encoded certificate in the given,
+// NUL-terminated pem block, in order, and returns them as an STACK_OF(X509).
+bssl::UniquePtr<STACK_OF(X509)> CertChainFromPEM(const char *pem);
+
 // CertsToStack converts a vector of |X509*| to an OpenSSL STACK_OF(X509),
 // bumping the reference counts for each certificate in question.
 bssl::UniquePtr<STACK_OF(X509)> CertsToStack(const std::vector<X509 *> &certs);
@@ -113,6 +117,15 @@ FILE* createRawTempFILE();
 TempFILE createTempFILE();
 size_t createTempDirPath(char buffer[PATH_MAX]);
 
+#if defined(OPENSSL_WINDOWS)
+// On Windows, antivirus software (e.g. Windows Defender), file indexing
+// services, or other background processes can briefly lock files after they are
+// created or modified. This causes transient ERROR_SHARING_VIOLATION failures
+// when a test immediately tries to reopen the file. This helper retries
+// opening the file for reading in a loop to wait out the lock.
+testing::AssertionResult WaitForFileAccessible(const char *path);
+#endif
+
 // Returns true if operating system is Amazon Linux and false otherwise.
 // Determined at run-time and requires read-permissions to /etc.
 bool osIsAmazonLinux(void);
@@ -144,6 +157,9 @@ testing::AssertionResult ErrorEquals(uint32_t err, int lib, int reason);
 // HexToBIGNUM decodes |hex| as a hexadecimal, big-endian, unsigned integer and
 // returns it as a |BIGNUM|, or nullptr on error.
 bssl::UniquePtr<BIGNUM> HexToBIGNUM(const char *hex);
+
+// BIGNUMToHex returns |bn| as a hexadecimal, big-endian, unsigned integer.
+std::string BIGNUMToHex(const BIGNUM *bn);
 
 // ExpectParse does a d2i parse using the corresponding template and function
 // pointer.

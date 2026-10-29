@@ -23,6 +23,17 @@ index 7fdd2be..7d8839f 100644
  
  PROTOCOLS = sorted(ssl._PROTOCOL_NAMES)
  HOST = socket_helper.HOST
+@@ -2193,7 +2194,9 @@ def test_unwrap(self):
+             connected_bio_pair(client_context, server_context,
+                                DISTRUSTED_SPKI_HOSTNAME)
+         # X509_V_ERR_CERT_REJECTED
+-        self.assertEqual(cm.exception.verify_code, 28)
++        # AWS-LC's built-in SPKI denylist reports X509_V_ERR_CERT_REVOKED
++        self.assertEqual(cm.exception.verify_code,
++                         23 if Py_OPENSSL_IS_AWSLC else 28)
+ 
+     def test_sni_callback_context_released_and_callback_raises(self):
+         # Variant of the test below without a HelloRetryRequest: the callback
 @@ -4424,14 +4426,14 @@ def test_session_handling(self):
      def test_psk(self):
          psk = bytes.fromhex('deadbeef')

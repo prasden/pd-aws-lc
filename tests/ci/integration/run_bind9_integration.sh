@@ -10,6 +10,12 @@ source tests/ci/common_posix_setup.sh
 
 python3 -m pip install --upgrade meson
 
+# LMDB is a mandatory dependency since bind9 commit 7f8b972a3d.
+if [ "$(id -u)" -eq 0 ]; then
+  apt-get update
+  apt-get install -y --no-install-recommends liblmdb-dev
+fi
+
 # SYS_ROOT
 #  - SRC_ROOT(aws-lc)
 #  - SCRATCH_FOLDER

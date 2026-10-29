@@ -40,10 +40,7 @@ jobs:
       - name: Commit the fix
         working-directory: aws-lc-fix
         run: |
-          if [ ! -f "$OUT/pr.md" ]; then
-            echo "::error::Review did not approve the $BRANCH fix, so no PR is opened."
-            exit 1
-          fi
+          test -f "$OUT/pr.md"
           git apply --index "$OUT/changes.diff"
           git -c core.hooksPath=/dev/null -c user.name=acl-ci-autofix -c user.email=acl-ci-autofix@users.noreply.github.com \
             commit -qm "$MESSAGE"

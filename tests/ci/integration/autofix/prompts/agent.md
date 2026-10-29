@@ -24,7 +24,7 @@ Your working directory is `{root}`. It holds:
 
 The container has no network and no credentials. Only these paths are writable: {editable}.
 
-You have no shell. Use the read, write, and edit tools for files, and the run tool for read-only commands.
+You have no shell. Use the read, write, and edit tools for files, and the run_command tool for read-only commands.
 
 # Rules
 

@@ -55,7 +55,7 @@ class Git:
 
     @staticmethod
     def config_env(config: dict[str, str]) -> dict[str, str]:
-        """Turn git config into env vars, which reach every git call in a process tree, even under su -p."""
+        """Return git settings as GIT_CONFIG_* env vars, so git commands in the replay container use them."""
         env = {"GIT_CONFIG_COUNT": str(len(config))}
         for index, (key, value) in enumerate(config.items()):
             env |= {f"GIT_CONFIG_KEY_{index}": key, f"GIT_CONFIG_VALUE_{index}": value}
@@ -68,22 +68,29 @@ class Git:
 
     @classmethod
     def clone(cls, repo: Repo, path: Path) -> Self:
-        """Clone the repo at its SHA, point every remote branch at that SHA, and keep each tag in the fetched history.
+        """Clone the repo at its SHA and point every branch at that SHA.
 
-        A runner that clones a named branch then still gets the failing commit, and git describe still finds the
-        nearest real tag. Example: tpm2-tss describes itself as 4.2.0-25-g1a9be928, not as an old tag moved to HEAD.
+        A runner that clones this repo gets the commit that failed in CI in case GitHub added a new commit.
         """
         path.mkdir(parents=True)
         git = cls(path)
         git.run("init", "-q")
         git.run("fetch", "-q", "--no-tags", "--depth", "500", repo.url, repo.sha)
         git.run("checkout", "-q", "FETCH_HEAD")
+
         history = set(git.run("rev-list", "HEAD").split())
-        refs = {name.removesuffix("^{}"): sha for sha, name in
-                (line.split("\t") for line in git.run("ls-remote", "--heads", "--tags", repo.url).splitlines())}
-        git.run("update-ref", "--stdin", input="".join(
+        remote = git.run("ls-remote", "--heads", "--tags", repo.url)
+        refs = {
+            name.removesuffix("^{}"): sha
+            for sha, name in (line.split("\t") for line in remote.splitlines())
+        }
+
+        updates = [
             f"update {name} {repo.sha if name.startswith('refs/heads/') else sha}\n"
-            for name, sha in refs.items() if name.startswith("refs/heads/") or sha in history))
+            for name, sha in refs.items()
+            if name.startswith("refs/heads/") or sha in history
+        ]
+        git.run("update-ref", "--stdin", input="".join(updates))
         return git
 
     def copy(self, parent: Path) -> Self:

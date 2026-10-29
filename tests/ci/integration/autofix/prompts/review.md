@@ -39,4 +39,4 @@ file and its runner step for a new upstream failure, and changing a build flag, 
 
 # Verdict
 
-Set `safe` to true only when every condition holds. When in doubt, set it to false. List each problem in `findings`.
+Set `safe` to true only when every condition holds. When in doubt, set it to false.

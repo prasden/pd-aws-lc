@@ -1,25 +1,25 @@
 import logging
 import shlex
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
 from .git import Repo
 
 # Allow only characters that cannot break out of a shell word, because downstream tests can rewrite the report.
-_SHELL_SAFE = r"^[A-Za-z0-9._:-]*$"
+ShellSafe = Annotated[str, Field(pattern=r"^[A-Za-z0-9._:-]*$")]
 
 
 class Environment(BaseModel, frozen=True):
-    image: str = Field(pattern=_SHELL_SAFE)
-    compiler: str = Field(pattern=_SHELL_SAFE)
+    image: ShellSafe
+    compiler: ShellSafe
     arch: Literal["x86_64", "aarch64"]
-    size: str = Field("small", pattern=_SHELL_SAFE)
-    job_id: int = 0
-    user: str = Field("", pattern=_SHELL_SAFE)
+    size: ShellSafe
+    job_id: int
+    user: ShellSafe = ""
     ipv6: bool = False
-    env_vars: dict[str, str] = {}
+    env_vars: dict[str, str]
 
 
 class IntegrationTarget(BaseModel):
@@ -48,15 +48,15 @@ class IntegrationTarget(BaseModel):
 
     def script(self, env: Environment) -> str:
         """Return the bash script that runs the runner the way the failed CI job did, with the aws CLI stubbed out."""
-        setup = f"/opt/compiler-env/setup-{env.compiler}.sh"
-        run = f"./{self.runner} {shlex.quote(self.version)}"
-        script = f"aws() {{ :; }}; export -f aws; [ -f {setup} ] && source {setup}; {run}"
-        if env.user:
-            script = f'export HOME=/home/{env.user} PATH="$CONTAINER_PATH"; {script}'
-            script = (f"mkdir -p /home/{env.user}; chown -R {env.user} /home/{env.user} . 2>/dev/null; "
-                      f"git config --system --add safe.directory '*'; export CONTAINER_PATH=\"$PATH\"; "
-                      f"su -p {env.user} -c {shlex.quote(script)}")
-        return script
+        script = (f"aws() {{ :; }}; export -f aws; source /opt/compiler-env/setup-{env.compiler}.sh; "
+                  f"./{self.runner} {shlex.quote(self.version)}")
+        if not env.user:
+            return script
+        home = f"/home/{env.user}"
+        script = f'export HOME={home} PATH="$CONTAINER_PATH"; {script}'
+        return (f"mkdir -p {home}; chown -R {env.user} {home} . 2>/dev/null; "
+                f"git config --system --add safe.directory '*'; export CONTAINER_PATH=\"$PATH\"; "
+                f"su -p {env.user} -c {shlex.quote(script)}")
 
 
 def recognize(reports: Path, awslc: Repo) -> list[dict]:

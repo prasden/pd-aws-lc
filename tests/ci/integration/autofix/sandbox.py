@@ -11,6 +11,7 @@ import docker
 from pydantic import BaseModel
 from strands import ToolContext, tool
 from strands.sandbox.docker import DockerSandbox
+from strands.vended_tools.shell.types import ShellOutput
 
 from .git import Git
 from .target import IntegrationTarget
@@ -106,7 +107,7 @@ class Sandbox:
         return self.replay(self.awslc.diff(self.editable))
 
     @tool(context=True, description=_RUN_DESCRIPTION)
-    async def run(self, argv: list[str], tool_context: ToolContext) -> dict[str, str | int]:
+    async def run(self, argv: list[str], tool_context: ToolContext) -> ShellOutput:
         self._check(argv)
         result = await tool_context.agent.sandbox.execute(shlex.join(argv), timeout=_COMMAND_TIMEOUT)
         return {"output": result.stdout, "error": result.stderr, "exit_code": result.exit_code}

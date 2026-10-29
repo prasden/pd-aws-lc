@@ -300,6 +300,24 @@ int tree_jitter_initialize(struct entropy_source_t *entropy_source) {
   // Initialize the global seed DRBG if haven't already.
   CRYPTO_once(global_seed_drbg_once_bss_get(), tree_jitter_initialize_once);
 
+  // Configure the per-thread seed DRBG. The UBE generation number must be
+  // sampled before deriving the seed below. Otherwise, an UBE occurring between
+  // deriving the seed and sampling the generation number would associate
+  // |tree_jitter_drbg| with a post-UBE generation number while its seed
+  // material predates the UBE, and |tree_jitter_check_drbg_must_reseed| would
+  // not be able to observe the UBE. |tree_jitter_initialize_once| samples the
+  // generation number of the global seed DRBG in the same order.
+  tree_jitter_drbg->is_global = 0;
+  tree_jitter_drbg->max_generate_calls = TREE_JITTER_THREAD_DRBG_MAX_GENERATE;
+  uint64_t current_generation_number = 0;
+  if (CRYPTO_get_ube_generation_number(&current_generation_number) != 1) {
+    tree_jitter_drbg->ube_protection = 0;
+    tree_jitter_drbg->generation_number = 0;
+  } else {
+    tree_jitter_drbg->ube_protection = 1;
+    tree_jitter_drbg->generation_number = current_generation_number;
+  }
+
   // Initialize the per-thread seed DRBG.
   uint8_t seed_drbg[CTR_DRBG_ENTROPY_LEN];
   CRYPTO_STATIC_MUTEX_lock_write(global_seed_drbg_lock_bss_get());
@@ -311,17 +329,6 @@ int tree_jitter_initialize(struct entropy_source_t *entropy_source) {
   }
   tree_jitter_drbg->reseed_calls_since_initialization = 1;
   OPENSSL_cleanse(seed_drbg, CTR_DRBG_ENTROPY_LEN);
-
-  tree_jitter_drbg->is_global = 0;
-  tree_jitter_drbg->max_generate_calls = TREE_JITTER_THREAD_DRBG_MAX_GENERATE;
-  uint64_t current_generation_number = 0;
-  if (CRYPTO_get_ube_generation_number(&current_generation_number) != 1) {
-    tree_jitter_drbg->ube_protection = 0;
-    tree_jitter_drbg->generation_number = 0;
-  } else {
-    tree_jitter_drbg->ube_protection = 1;
-    tree_jitter_drbg->generation_number = current_generation_number;
-  }
 
   entropy_source->state = tree_jitter_drbg;
 
@@ -409,6 +416,14 @@ void tree_jitter_free_thread_drbg(struct entropy_source_t *entropy_source) {
 // extra work to use random data (from the OS source) ensures that even if some
 // output were to escape from the randomness generation, it will still be sound
 // practically.
+//
+// Windows shared builds take the zeros option: there this runs from a libcrypto
+// global destructor on |DLL_PROCESS_DETACH|, after |ExitProcess|, where
+// |CRYPTO_sysrand| faults on bcryptprimitives.dll (loaded on demand, so not
+// kept alive by libcrypto's dependency graph). Static builds run it from the
+// executable's |atexit| and are unaffected. Zeros still override every state in
+// the tree, losing only the defence in depth above, which the write-locked
+// frontend DRBGs already cover.
 
 // tree_jitter_zeroize_drbg zeroizes the DRBG state configured in
 // |tree_jitter_drbg|.
@@ -416,7 +431,11 @@ static void tree_jitter_zeroize_drbg(
   struct tree_jitter_drbg_t *tree_jitter_drbg) {
 
   uint8_t random_data[CTR_DRBG_ENTROPY_LEN];
+#if defined(OPENSSL_WINDOWS) && defined(BORINGSSL_SHARED_LIBRARY)
+  OPENSSL_memset(random_data, 0, CTR_DRBG_ENTROPY_LEN);
+#else
   CRYPTO_sysrand_if_available(random_data, CTR_DRBG_ENTROPY_LEN);
+#endif
 
   if (CTR_DRBG_reseed(&(tree_jitter_drbg->drbg), random_data, NULL, 0) != 1) {
     abort();

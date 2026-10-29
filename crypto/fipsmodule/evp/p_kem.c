@@ -5,6 +5,7 @@
 
 #include <openssl/err.h>
 #include <openssl/mem.h>
+#include <openssl/rand.h>
 
 #include "../crypto/evp_extra/internal.h"
 #include "internal.h"
@@ -72,7 +73,13 @@ static int pkey_kem_keygen_deterministic(EVP_PKEY_CTX *ctx,
   size_t secret_len = kem->secret_key_len;
   if (key == NULL ||
       !KEM_KEY_init(key, kem) ||
-      !kem->method->keygen_deterministic(key->public_key, &pubkey_len, key->secret_key, &secret_len, seed) ||
+      !kem->method->keygen_deterministic(key->public_key, &pubkey_len, key->secret_key, &secret_len, seed)) {
+    KEM_KEY_free(key);
+    return 0;
+  }
+
+  key->seed = OPENSSL_memdup(seed, kem->keygen_seed_len);
+  if (key->seed == NULL ||
       !EVP_PKEY_assign(pkey, EVP_PKEY_KEM, key)) {
     KEM_KEY_free(key);
     return 0;
@@ -97,9 +104,25 @@ static int pkey_kem_keygen(EVP_PKEY_CTX *ctx, EVP_PKEY *pkey) {
   KEM_KEY *key = KEM_KEY_new();
   size_t pubkey_len = kem->public_key_len;
   size_t secret_len = kem->secret_key_len;
+
+  // Generate random seed, use deterministic keygen, and save the seed.
+  // All ML-KEM variants use 64-byte seeds (d || z).
+  uint8_t seed[64];
+  BSSL_CHECK(kem->keygen_seed_len == 64);
+  RAND_bytes(seed, kem->keygen_seed_len);
+
   if (key == NULL ||
       !KEM_KEY_init(key, kem) ||
-      !kem->method->keygen(key->public_key, &pubkey_len, key->secret_key, &secret_len) ||
+      !kem->method->keygen_deterministic(key->public_key, &pubkey_len,
+                                         key->secret_key, &secret_len, seed)) {
+    OPENSSL_cleanse(seed, sizeof(seed));
+    KEM_KEY_free(key);
+    return 0;
+  }
+
+  key->seed = OPENSSL_memdup(seed, kem->keygen_seed_len);
+  OPENSSL_cleanse(seed, sizeof(seed));
+  if (key->seed == NULL ||
       !EVP_PKEY_set_type(pkey, EVP_PKEY_KEM)) {
     KEM_KEY_free(key);
     return 0;
@@ -194,7 +217,9 @@ static int pkey_kem_encapsulate(EVP_PKEY_CTX *ctx,
                                 size_t  *ciphertext_len,
                                 uint8_t *shared_secret,
                                 size_t  *shared_secret_len) {
+  GUARD_PTR(ctx);
   KEM_PKEY_CTX *dctx = ctx->data;
+  GUARD_PTR(dctx);
   const KEM *kem = dctx->kem;
   if (kem == NULL) {
     if (ctx->pkey == NULL) {
@@ -202,6 +227,12 @@ static int pkey_kem_encapsulate(EVP_PKEY_CTX *ctx,
       return 0;
     }
     kem = KEM_KEY_get0_kem(ctx->pkey->pkey.kem_key);
+  }
+
+  // Check that length pointers can be written to.
+  if (ciphertext_len == NULL || shared_secret_len == NULL) {
+    OPENSSL_PUT_ERROR(EVP, ERR_R_PASSED_NULL_PARAMETER);
+    return 0;
   }
 
   // Caller is getting parameter values.
@@ -257,7 +288,9 @@ static int pkey_kem_decapsulate(EVP_PKEY_CTX *ctx,
                                 size_t  *shared_secret_len,
                                 const uint8_t *ciphertext,
                                 size_t ciphertext_len) {
+  GUARD_PTR(ctx);
   KEM_PKEY_CTX *dctx = ctx->data;
+  GUARD_PTR(dctx);
   const KEM *kem = dctx->kem;
   if (kem == NULL) {
     if (ctx->pkey == NULL) {
@@ -267,10 +300,22 @@ static int pkey_kem_decapsulate(EVP_PKEY_CTX *ctx,
     kem = KEM_KEY_get0_kem(ctx->pkey->pkey.kem_key);
   }
 
+  // Check that the length pointer can be written to.
+  if (shared_secret_len == NULL) {
+    OPENSSL_PUT_ERROR(EVP, ERR_R_PASSED_NULL_PARAMETER);
+    return 0;
+  }
+
   // Caller is getting parameter values.
   if (shared_secret == NULL) {
     *shared_secret_len = kem->shared_secret_len;
     return 1;
+  }
+
+  // The ciphertext buffer must be non-NULL for actual decapsulation.
+  if (ciphertext == NULL) {
+    OPENSSL_PUT_ERROR(EVP, ERR_R_PASSED_NULL_PARAMETER);
+    return 0;
   }
 
   // The input and output buffers need to be large enough.
@@ -366,8 +411,6 @@ int EVP_PKEY_kem_set_params(EVP_PKEY *pkey, int nid) {
     return 0;
   }
 
-  evp_pkey_set_method(pkey, &kem_asn1_meth);
-
   KEM_KEY *key = KEM_KEY_new();
   if (key == NULL) {
     // KEM_KEY_new sets the appropriate error.
@@ -375,7 +418,7 @@ int EVP_PKEY_kem_set_params(EVP_PKEY *pkey, int nid) {
   }
 
   key->kem = kem;
-  pkey->pkey.kem_key = key;
+  evp_pkey_set0(pkey, &kem_asn1_meth, key);
 
   return 1;
 }
@@ -488,6 +531,14 @@ err:
 // to the secret key in |key| by performing encapsulation and decapsulation
 // and checking that the generated shared secrets are equal.
 int EVP_PKEY_kem_check_key(EVP_PKEY *key) {
+  // |key->pkey| is a union, so the type has to be checked before |kem_key| is
+  // read; otherwise another algorithm's key pointer would be interpreted as a
+  // |KEM_KEY *|. The EVP dispatch this function used to go through did this.
+  if (key != NULL && key->type != EVP_PKEY_KEM) {
+    OPENSSL_PUT_ERROR(EVP, EVP_R_EXPECTING_A_KEM_KEY);
+    return 0;
+  }
+
   if (key == NULL || key->pkey.kem_key == NULL ||
       key->pkey.kem_key->public_key == NULL ||
       key->pkey.kem_key->secret_key == NULL) {
@@ -495,53 +546,9 @@ int EVP_PKEY_kem_check_key(EVP_PKEY *key) {
     return 0;
   }
 
-  EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(key, NULL);
-  if (ctx == NULL) {
-    OPENSSL_PUT_ERROR(EVP, ERR_R_INTERNAL_ERROR);
-    return 0;
-  }
-
-  int ret = 0;
-
-  // Get the required buffer lengths and allocate the buffers.
-  size_t ct_len, ss_len;
-  uint8_t *ct = NULL, *ss_a = NULL, *ss_b = NULL;
-  if (!EVP_PKEY_encapsulate(ctx, NULL, &ct_len, NULL, &ss_len)) {
-    OPENSSL_PUT_ERROR(EVP, ERR_R_INTERNAL_ERROR);
-    goto end;
-  }
-  ct = OPENSSL_malloc(ct_len);
-  ss_a = OPENSSL_malloc(ss_len);
-  ss_b = OPENSSL_malloc(ss_len);
-  if (ct == NULL || ss_a == NULL || ss_b == NULL) {
-    OPENSSL_PUT_ERROR(EVP, ERR_R_INTERNAL_ERROR);
-    goto end;
-  }
-
-  // Encapsulate and decapsulate.
-  if (!EVP_PKEY_encapsulate(ctx, ct, &ct_len, ss_b, &ss_len) ||
-      !EVP_PKEY_decapsulate(ctx, ss_a, &ss_len, ct, ct_len)) {
-    OPENSSL_PUT_ERROR(EVP, ERR_R_INTERNAL_ERROR);
-    goto end;
-  }
-
-  // Compare the shared secrets.
-  uint8_t res = 0;
-  for (size_t i = 0; i < ss_len; i++) {
-    res |= ss_a[i] ^ ss_b[i];
-  }
-
-  // If the shared secrets |ss_a| and |ss_b| are the same then |res| is equal
-  // to zero, otherwise it's not. |constant_time_is_zero_8| returns 0xff when
-  // |res| is equal to zero, and returns 0 otherwise. To be consistent with the
-  // rest of the library, we extract only the first bit so that |ret| is either
-  // 0 or 1.
-  ret = constant_time_is_zero_8(res) & 1;
-
-end:
-  OPENSSL_free(ct);
-  OPENSSL_free(ss_a);
-  OPENSSL_free(ss_b);
-  EVP_PKEY_CTX_free(ctx);
-  return ret;
+  // |KEM_check_key| performs the encapsulate/decapsulate consistency check this
+  // function documents above, and additionally validates the public and secret
+  // key encodings. The NULL checks above keep this function's stricter contract,
+  // which requires both halves of the key pair to be present.
+  return KEM_check_key(key->pkey.kem_key);
 }

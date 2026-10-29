@@ -286,12 +286,15 @@ OPENSSL_EXPORT uint64_t BIO_number_read(const BIO *bio);
 // |bio|.
 OPENSSL_EXPORT uint64_t BIO_number_written(const BIO *bio);
 
-// BIO_set_callback_ex sets the |callback_ex| for |bio|.
+// BIO_set_callback_ex sets the |callback_ex| for |bio|. The callback is
+// invoked without incrementing the BIO's reference count, so a callback must
+// not call BIO_free on the BIO it is invoked on.
 OPENSSL_EXPORT void BIO_set_callback_ex(BIO *bio, BIO_callback_fn_ex callback_ex);
 
-// BIO_set_callback sets the legacy |callback| for |bio|. When both |callback| and
-// |callback_ex| are set, |callback_ex| will be used. Added for compatibility with
-// existing applications.
+// BIO_set_callback sets the legacy |callback| for |bio|. The same reference
+// count note as |BIO_set_callback_ex| applies. When both |callback| and
+// |callback_ex| are set, |callback_ex| will be used. Added for compatibility
+// with existing applications.
 OPENSSL_EXPORT OPENSSL_DEPRECATED void BIO_set_callback(BIO *bio, BIO_callback_fn callback);
 
 // BIO_set_callback_arg sets the callback |arg| for |bio|.
@@ -374,6 +377,10 @@ OPENSSL_EXPORT void ERR_print_errors(BIO *bio);
 // function will fail. Long-form tags are not supported. If the length of the
 // object is indefinite the full contents of |bio| are read, unless it would be
 // greater than |max_len|, in which case the function fails.
+//
+// |max_len| limits how large an object will be accepted, not how much memory is
+// allocated up front. The buffer grows as |bio| delivers content, so a header
+// claiming more than |bio| has does not allocate the larger amount.
 //
 // If the function fails then some unknown amount of data may have been read
 // from |bio|.
@@ -776,9 +783,9 @@ OPENSSL_EXPORT int BIO_ADDR_family(const BIO_ADDR *ap);
 // The address data from |ap| is copied into the buffer |p| if |p| is not NULL.
 // If |l| is not NULL, |*l| will be updated with the size of the address data.
 // For AF_INET, this is the 4-byte IPv4 address; for AF_INET6, the 16-byte IPv6
-// address; for AF_UNIX, the socket path. With AF_UNIX addresses, the buffer |p|
-// must be large enough for both the path and a NUL terminator. The function will
-// write the terminator to the buffer, but the length stored in |*l| excludes it.
+// address; for AF_UNIX, the socket path followed by a NUL terminator. The
+// length stored in |*l| includes the NUL for AF_UNIX so that it matches the
+// number of bytes written to |p|.
 // Returns 1 on success, 0 if the address family is unsupported or |ap| is NULL.
 OPENSSL_EXPORT int BIO_ADDR_rawaddress(const BIO_ADDR *ap, void *p, size_t *l);
 

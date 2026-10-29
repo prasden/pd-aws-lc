@@ -12,7 +12,7 @@
 
 
 int FIPS_mode(void) {
-#if defined(BORINGSSL_FIPS) && !defined(OPENSSL_ASAN)
+#if defined(BORINGSSL_FIPS) && !defined(OPENSSL_ASAN) && !defined(OPENSSL_MSAN)
   return 1;
 #else
   return 0;
@@ -25,5 +25,15 @@ int FIPS_is_entropy_cpu_jitter(void) {
   }
   return 1;
 }
+
+uint32_t FIPS_version(void) {
+#if defined(BORINGSSL_FIPS) && !defined(OPENSSL_ASAN) && !defined(OPENSSL_MSAN)
+  return AWSLC_FIPS_VERSION_NUMBER;
+#else
+  return 0;
+#endif
+}
+
+const char *FIPS_module_name(void) { return AWSLC_MODULE_NAME_STRING; }
 
 int FIPS_mode_set(int on) { return on == FIPS_mode(); }

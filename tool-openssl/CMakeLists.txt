@@ -20,10 +20,13 @@ add_executable(
     enc.cc
     genpkey.cc
     genrsa.cc
+    ocsp.cc
     pass_util.cc
     pkcs8.cc
+    pkcs12.cc
     pkey.cc
     pkeyutl.cc
+    rand.cc
     rehash.cc
     req.cc
     ordered_args.cc
@@ -58,6 +61,10 @@ endif()
 
 target_add_awslc_include_paths(TARGET openssl SCOPE PRIVATE)
 
+if(COHABITANT_BINARIES)
+  set_target_properties(openssl PROPERTIES OUTPUT_NAME "${AWSLC_BIN_PREFIX}openssl")
+endif()
+
 install(TARGETS openssl
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         BUNDLE DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -76,10 +83,16 @@ file(INSTALL
     c_rehash
 )
 
+set(C_REHASH_INSTALL_NAME "c_rehash")
+
+if(COHABITANT_BINARIES)
+  set(C_REHASH_INSTALL_NAME "${AWSLC_BIN_PREFIX}c_rehash")
+endif()
+
 install(
-    PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/c_rehash.sh
-    RENAME c_rehash
-    DESTINATION ${CMAKE_INSTALL_BINDIR}
+  PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/c_rehash.sh
+  RENAME ${C_REHASH_INSTALL_NAME}
+  DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
 if(MSVC AND CMAKE_BUILD_TYPE_LOWER MATCHES "relwithdebinfo" AND FIPS)
@@ -120,15 +133,22 @@ if(BUILD_TESTING)
         genrsa_test.cc
         genpkey.cc
         genpkey_test.cc
+        ocsp.cc
+        ocsp_test.cc
         ordered_args.cc
+        ordered_args_test.cc
         pass_util.cc
         pass_util_test.cc
         pkcs8.cc
         pkcs8_test.cc
+        pkcs12.cc
+        pkcs12_test.cc
         pkey.cc
         pkey_test.cc
         pkeyutl.cc
         pkeyutl_test.cc
+        rand.cc
+        rand_test.cc
         rehash.cc
         rehash_test.cc
         req.cc
@@ -138,6 +158,7 @@ if(BUILD_TESTING)
         s_client.cc
         s_client_test.cc
         test_util.cc
+        tool_test.cc
         tool_util.cc
         verify.cc
         verify_test.cc
@@ -164,4 +185,14 @@ if(BUILD_TESTING)
     add_dependencies(all_tests tool_openssl_test)
     add_dependencies(tool_openssl_test openssl)
     set_test_location(tool_openssl_test)
+endif()
+
+# Create binary symlinks for OpenSSL compatibility
+if(INSTALL_OPENSSL_SHIM AND COHABITANT_BINARIES)
+  install(CODE "
+    execute_process(COMMAND \${CMAKE_COMMAND} -E create_symlink
+      \"${AWSLC_BIN_PREFIX}openssl\" \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/openssl\")
+    execute_process(COMMAND \${CMAKE_COMMAND} -E create_symlink
+      \"${AWSLC_BIN_PREFIX}c_rehash\" \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/c_rehash\")
+  ")
 endif()

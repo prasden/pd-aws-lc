@@ -195,17 +195,35 @@ int EVP_MD_CTX_reset(EVP_MD_CTX *ctx) {
 
 int EVP_DigestInit_ex(EVP_MD_CTX *ctx, const EVP_MD *type, ENGINE *engine) {
   if (ctx->digest != type) {
-    ctx->digest = type;
     if (!used_for_hmac(ctx)) {
+      // Drop any existing digest state first. On allocation failure below
+      // |ctx| is left in an empty-but-valid state equivalent to a freshly
+      // |EVP_MD_CTX_init|'d context.
+      OPENSSL_free(ctx->md_data);
+      ctx->md_data = NULL;
+      ctx->update = NULL;
+      ctx->digest = NULL;
+
       assert(type->ctx_size != 0);
-      ctx->update = type->update;
       uint8_t *md_data = OPENSSL_malloc(type->ctx_size);
+      if (md_data == NULL) {
+        return 0;
+      }
+      ctx->md_data = md_data;
+      ctx->update = type->update;
+    } else {
+      // |EVP_MD_CTX_copy_ex| and |EVP_MD_CTX_cleanse| size |ctx->md_data| by
+      // |ctx->digest|, which advances below, so resize the buffer to match.
+      // |ctx->update| stays, as |EVP_PKEY_HMAC| owns it. Zero it; nothing else will.
+      assert(type->ctx_size != 0);
+      uint8_t *md_data = OPENSSL_zalloc(type->ctx_size);
       if (md_data == NULL) {
         return 0;
       }
       OPENSSL_free(ctx->md_data);
       ctx->md_data = md_data;
     }
+    ctx->digest = type;
   }
 
   assert(ctx->pctx == NULL || ctx->pctx_ops != NULL);

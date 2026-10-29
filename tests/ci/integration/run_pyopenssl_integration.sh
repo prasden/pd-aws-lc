@@ -33,6 +33,7 @@ function pyopenssl_clone() {
     git clone https://github.com/pyca/pyopenssl.git ${src_dir} \
         --depth 1 \
         --branch ${branch}
+    record_repo_commit "${src_dir}"
     for patchfile in $(find -L ${patch_dir} -type f -name '*.patch'); do
         echo "Applying patch ${patchfile}..."
         patch -p1 --quiet -d ${src_dir} -i "${patchfile}"
@@ -54,16 +55,20 @@ function pyopenssl_run_tests() {
     # Upgrade pip and install build dependencies.
     python -m pip install --upgrade pip setuptools wheel
 
-    # Install the Rust and the bindgen-cli, needed by cryptography when building
-    # against AWS-LC.
-    curl https://sh.rustup.rs -sSf | sh -s -- -y
-    . "$HOME/.cargo/env"
+    # Install bindgen-cli, needed by cryptography when building against AWS-LC.
     cargo install bindgen-cli
 
     # Build cryptography from source so it links against AWS-LC via OPENSSL_DIR.
     # Prebuilt wheels bundle their own libcrypto and would ignore OPENSSL_DIR.
     # Version >= 46 is required for AWS-LC source build support.
-    python -m pip install --no-binary cryptography cryptography
+    #
+    # Export PIP_NO_BINARY so subsequent `pip install` invocations (e.g. the
+    # PyOpenSSL install below) cannot transitively downgrade cryptography to a
+    # prebuilt wheel that bundles its own libcrypto. PyOpenSSL pins an upper
+    # bound on cryptography, and without this pip will silently replace our
+    # AWS-LC-linked build with a manylinux wheel when resolving dependencies.
+    export PIP_NO_BINARY=cryptography
+    python -m pip install cryptography
 
     # Install PyOpenSSL from the patched source along with test dependencies.
     python -m pip install -e '.[test]'

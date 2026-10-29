@@ -4,8 +4,12 @@
 #include <gtest/gtest.h>
 #include <signal.h>
 
+#include <openssl/base.h>
+
 #include "internal.h"
 #include "../test/test_util.h"
+
+#if !defined(OPENSSL_NO_TTY)
 
 #if defined(OPENSSL_WINDOWS)
 #include <io.h>
@@ -162,6 +166,22 @@ TEST_F(PemPasswdTest, PasswordInputVariations) {
   }
 }
 
+TEST_F(PemPasswdTest, RedirectedCRLFInput) {
+  // createRawTempFILE opens in binary mode, like the Windows CLI's stdin.
+  MockStdinInput("password\r\n\r\nwith\rcarriage\r\n");
+#if defined(OPENSSL_WINDOWS)
+  const char *expected[] = {"password", "", "with\rcarriage"};
+#else
+  // A CR is part of the password on POSIX, not a line terminator.
+  const char *expected[] = {"password\r", "\r", "with\rcarriage\r"};
+#endif
+  for (const char *password : expected) {
+    char buf[1024];
+    ASSERT_EQ(0, openssl_console_read(buf, 0, sizeof(buf), 0));
+    EXPECT_STREQ(password, buf);
+  }
+}
+
 // Test password verification flow (matching and non-matching)
 TEST_F(PemPasswdTest, PasswordVerification) {
   struct TestCase {
@@ -250,3 +270,5 @@ TEST_F(PemPasswdTest, EchoModes) {
   ASSERT_STREQ(buf_with_echo, "test_password");
 }
 #endif
+
+#endif  // !OPENSSL_NO_TTY

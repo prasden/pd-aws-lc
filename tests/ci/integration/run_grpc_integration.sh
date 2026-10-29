@@ -6,6 +6,11 @@ set -exu
 
 source tests/ci/common_posix_setup.sh
 
+# Optional first argument: grpc git ref (release tag, branch, or commit SHA).
+# Defaults to a pinned stable release so per-PR CI has a stable signal; the
+# nightly build passes 'master' to track upstream (informational).
+GRPC_REF="${1:-v1.72.2}"
+
 # SYS_ROOT
 #  |
 #  - SRC_ROOT(aws-lc)
@@ -21,6 +26,8 @@ source tests/ci/common_posix_setup.sh
 SCRATCH_FOLDER="${SYS_ROOT}/GRPC_BUILD_ROOT"
 GRPC_SRC_FOLDER="${SCRATCH_FOLDER}/grpc"
 GRPC_BUILD_FOLDER="${SCRATCH_FOLDER}/grpc/cmake/build"
+# Patches are keyed by the ref being tested; a ref with no directory needs none.
+GRPC_PATCH_FOLDER="${SRC_ROOT}/tests/ci/integration/grpc_patch/${GRPC_REF}"
 AWS_LC_BUILD_FOLDER="${SCRATCH_FOLDER}/aws-lc-build"
 AWS_LC_INSTALL_FOLDER="${SCRATCH_FOLDER}/aws-lc-install"
 
@@ -29,9 +36,17 @@ rm -rf ${SCRATCH_FOLDER}/*
 cd ${SCRATCH_FOLDER}
 mkdir -p ${AWS_LC_BUILD_FOLDER} ${AWS_LC_INSTALL_FOLDER}
 
-git clone --depth 1 https://github.com/grpc/grpc.git ${GRPC_SRC_FOLDER}
+git clone --depth 1 --branch "${GRPC_REF}" https://github.com/grpc/grpc.git ${GRPC_SRC_FOLDER}
+record_repo_commit "${GRPC_SRC_FOLDER}"
 cd ${GRPC_SRC_FOLDER}
 git submodule update --recursive --init
+
+if [[ -d "${GRPC_PATCH_FOLDER}" ]]; then
+    for patchfile in $(find -L "${GRPC_PATCH_FOLDER}" -type f -name '*.patch'); do
+        echo "Apply patch ${patchfile}..."
+        patch --strip 1 --quiet -d "${GRPC_SRC_FOLDER}" --input "${patchfile}"
+    done
+fi
 
 aws_lc_build "$SRC_ROOT" "$AWS_LC_BUILD_FOLDER" "$AWS_LC_INSTALL_FOLDER" -DBUILD_TESTING=OFF -DBUILD_TOOL=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_SHARED_LIBS=1
 
@@ -45,8 +60,12 @@ time cmake -GNinja -DgRPC_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release  -DgRPC_SSL_
       -DBUILD_SHARED_LIBS=ON -DOPENSSL_ROOT_DIR="${AWS_LC_INSTALL_FOLDER}" \
       -DCMAKE_C_FLAGS="-DOPENSSL_IS_BORINGSSL=1" -DCMAKE_CXX_FLAGS="-DOPENSSL_IS_BORINGSSL=1" ../..
 grpc_tests=$(grep add_executable ../../CMakeLists.txt | grep _test | grep -E '(tls|ssl|cert)' | cut -d '(' -f2)
-echo Building $grpc_tests
-time ninja $grpc_tests
+# bad_ssl_*_test binaries spawn bad_ssl_*_server at runtime. This dependency is
+# declared via "data" in Bazel (test/core/bad_ssl/generate_tests.bzl) but is not
+# carried over to the generated CMakeLists.txt, so we must build them explicitly.
+grpc_test_deps=$(grep add_executable ../../CMakeLists.txt | grep bad_ssl_ | grep -v _test | cut -d '(' -f2)
+echo Building $grpc_tests $grpc_test_deps
+time ninja $grpc_tests $grpc_test_deps
 
 # grpc tests expect to use relative paths to certificates and test files
 cd "${GRPC_SRC_FOLDER}"

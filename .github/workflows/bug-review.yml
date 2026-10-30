@@ -1,0 +1,51 @@
+name: bug-review
+
+on:
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: bug-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  review:
+    if: ${{ github.event.label.name == 'ai' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      pull-requests: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::535337619039:role/PrReview-pd-aws-lc-GitHubRole-G4VwYBrT3LIk
+          role-session-name: bug-review-${{ github.run_id }}
+          aws-region: us-west-2
+
+      - name: Review
+        run: |
+          BUILD_ID=$(aws codebuild start-build --project-name PrReview-${{ github.event.repository.name }} \
+            --environment-variables-override "name=PR_NUMBER,value=$PR_NUMBER,type=PLAINTEXT" \
+            --query build.id --output text)
+          while STATUS=$(aws codebuild batch-get-builds --ids "$BUILD_ID" --query 'builds[0].buildStatus' --output text); [[ "$STATUS" == IN_PROGRESS ]]; do
+            sleep 30
+          done
+          [[ "$STATUS" == SUCCEEDED ]] || { echo "review build $STATUS"; exit 1; }
+          URI=$(aws codebuild batch-get-builds --ids "$BUILD_ID" \
+            --query 'builds[0].exportedEnvironmentVariables[?name==`REVIEW_URI`].value' --output text)
+          aws s3 cp --quiet "$URI" review.json
+
+      - name: Post
+        run: |
+          REPO=${{ github.repository }}
+          jq .review review.json | gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --input - > /dev/null
+          for stale in $(jq -r '.stale_labels[]' review.json); do
+            gh api -X DELETE "repos/$REPO/issues/$PR_NUMBER/labels/$stale" > /dev/null 2>&1 || true
+          done
+          jq '{labels: [.label]}' review.json | gh api "repos/$REPO/issues/$PR_NUMBER/labels" --input - > /dev/null

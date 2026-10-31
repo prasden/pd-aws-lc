@@ -29,10 +29,17 @@ jobs:
           aws-region: us-west-2
 
       - name: Review
+        env:
+          PULL: ${{ toJSON(github.event.pull_request) }}
         run: |
+          RUNS=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.pull_request.head.sha }}/check-runs?per_page=100" \
+            --jq '[.check_runs[] | {name, conclusion}]')
+          CONTEXT=$(jq -nc --argjson pull "$PULL" --argjson runs "$RUNS" \
+            '{pull: ($pull | {number, title, body, state, draft, user: {login: .user.login}, base: {sha: .base.sha}, head: {sha: .head.sha}}), check_runs: $runs}')
+          OVERRIDES=$(jq -nc --arg n "$PR_NUMBER" --arg c "$CONTEXT" \
+            '[{name: "PR_NUMBER", value: $n, type: "PLAINTEXT"}, {name: "PR_CONTEXT_JSON", value: $c, type: "PLAINTEXT"}]')
           BUILD_ID=$(aws codebuild start-build --project-name PrReview-${{ github.event.repository.name }} \
-            --environment-variables-override "name=PR_NUMBER,value=$PR_NUMBER,type=PLAINTEXT" \
-            --query build.id --output text)
+            --environment-variables-override "$OVERRIDES" --query build.id --output text)
           while STATUS=$(aws codebuild batch-get-builds --ids "$BUILD_ID" --query 'builds[0].buildStatus' --output text); [[ "$STATUS" == IN_PROGRESS ]]; do
             sleep 30
           done

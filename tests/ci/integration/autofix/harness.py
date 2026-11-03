@@ -18,6 +18,7 @@ from strands_harness import create_harness
 
 from .git import Git, Repo
 from .sandbox import Sandbox, ReplayResult
+from .session import Session
 from .target import IntegrationTarget
 
 _MODEL = f"bedrock/{json.loads((Path(__file__).parents[4] / '.github/workflows/ai-config.json').read_text())['opus']}"
@@ -106,8 +107,8 @@ class Harness:
             })
         return matrix
 
-    @staticmethod
-    def _run_agent(instructions: str, message: str, timeout: int, **options: Any) -> AgentResult:
+    def _run_agent(self, name: str, instructions: str, message: str, timeout: int, **options: Any) -> AgentResult:
+        """Run one agent and save its transcript and session to out/, even if it fails or times out."""
         agent = create_harness(**{
             "model": _MODEL,
             "instructions": instructions,
@@ -126,6 +127,7 @@ class Harness:
             return agent(message, limits=_LIMITS)
         finally:
             timer.cancel()
+            Session.of(agent, _MODEL).save(self.out, name)
 
     def reason(self, registry: str) -> ReplayResult:
         """Run an agent that fixes the runner script and .patch files in a container with no network.
@@ -145,6 +147,7 @@ class Harness:
 
         with self.sandbox.agent_container() as container:
             final_message = self._run_agent(
+                "reason",
                 instructions,
                 "Start by reading the logs.",
                 _REASON_TIMEOUT,
@@ -229,6 +232,7 @@ class Harness:
                        f"<description>\n{description}\n</description>")
 
             verdict = self._run_agent(
+                "review",
                 (_PROMPTS / "review.md").read_text(),
                 message,
                 _TIMEOUT,

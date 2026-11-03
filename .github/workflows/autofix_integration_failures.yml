@@ -151,6 +151,18 @@ jobs:
         working-directory: tests/ci/integration
         run: python3 -m autofix review
       - *upload
+      - if: always()
+        uses: ./.github/actions/configure-aws-credentials
+        with:
+          oidcRole: AwsLcGitHubActionsAutofixOidcRole
+          roleName: AwsLcGitHubActionAutofixUploadRole
+      - name: Upload results to S3
+        if: always()
+        env:
+          NAME: ${{ matrix.name }}
+        run: |
+          aws s3 cp "$WORK_DIR/out" "s3://${AWS_ACCOUNT_ID}-aws-lc-autofix-integration-failures/$(date -u +%F)-$NAME" \
+            --recursive --exclude "logs/*"
 
   resolve:
     needs: [get-failing-integrations, review]

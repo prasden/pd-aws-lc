@@ -22,6 +22,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
+      - name: React with eyes while the review runs
+        run: |
+          ID=$(gh api -X POST "repos/${{ github.repository }}/issues/$PR_NUMBER/reactions" -f content=eyes --jq .id)
+          echo "EYES_ID=$ID" >> "$GITHUB_ENV"
+
       - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::535337619039:role/PrReview-pd-aws-lc-GitHubRole-G4VwYBrT3LIk
@@ -51,8 +56,18 @@ jobs:
       - name: Post
         run: |
           REPO=${{ github.repository }}
-          jq .review review.json | gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --input - > /dev/null
+          if [[ "$(jq '.review != null' review.json)" == true ]]; then
+            jq .review review.json | gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --input - > /dev/null
+          fi
           for stale in $(jq -r '.stale_labels[]' review.json); do
             gh api -X DELETE "repos/$REPO/issues/$PR_NUMBER/labels/$stale" > /dev/null 2>&1 || true
           done
           jq '{labels: [.label]}' review.json | gh api "repos/$REPO/issues/$PR_NUMBER/labels" --input - > /dev/null
+
+      - name: Swap eyes for a result reaction
+        if: always()
+        run: |
+          REPO=${{ github.repository }}
+          [[ -n "$EYES_ID" ]] && gh api -X DELETE "repos/$REPO/issues/$PR_NUMBER/reactions/$EYES_ID" > /dev/null || true
+          RESULT=$([[ "${{ job.status }}" == success ]] && echo "+1" || echo confused)
+          gh api -X POST "repos/$REPO/issues/$PR_NUMBER/reactions" -f content="$RESULT" > /dev/null

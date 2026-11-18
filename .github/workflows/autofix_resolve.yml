@@ -55,38 +55,39 @@ jobs:
         run: |
           git -c core.hooksPath=/dev/null -c user.name=acl-ci-autofix -c user.email=acl-ci-autofix@users.noreply.github.com \
             commit -qm "$MESSAGE"
+      - name: Load shared AWS settings
+        run: jq -r '"AWS_REGION=\(.aws_region)"' .github/workflows/ai-config.json >> "$GITHUB_ENV"
+      - uses: ./.github/actions/configure-aws-credentials
+        with:
+          oidcRole: AwsLcGitHubActionsAutofixResolveOidcRole
+          roleName: AwsLcGitHubActionAutofixSecretsRole
+      - uses: aws-actions/aws-secretsmanager-get-secrets@v2
+        with:
+          secret-ids: |
+            PUSH_APP_PRIVATE_KEY,aws-lc/ci/autofix-push-app
+            APP_PRIVATE_KEY,acl-ci/credentials
       - uses: actions/create-github-app-token@v2
-        id: push-app-token
-        continue-on-error: true
+        id: push-token
         with:
           app-id: ${{ vars.AUTOFIX_PUSH_APP_ID }}
-          private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
-          owner: prasden
-          repositories: pd-aws-lc
+          private-key: ${{ env.PUSH_APP_PRIVATE_KEY }}
+          owner: crypto-alg
+          repositories: aws-lc
           permission-contents: write
           permission-workflows: write
       - uses: actions/create-github-app-token@v2
-        id: fallback-push-token
-        if: steps.push-app-token.outcome != 'success'
-        with:
-          app-id: ${{ vars.AUTOFIX_APP_ID }}
-          private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
-          owner: prasden
-          repositories: pd-aws-lc
-          permission-contents: write
-      - uses: actions/create-github-app-token@v2
         id: pr-token
         with:
-          app-id: ${{ vars.AUTOFIX_APP_ID }}
-          private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
+          app-id: ${{ vars.ACL_CI_APP_ID }}
+          private-key: ${{ env.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-pull-requests: write
-      - name: Push the fix to the fork and open a draft PR
+      - name: Push the fix to crypto-alg and open a draft PR
         working-directory: aws-lc-fix
         env:
           GH_TOKEN: ${{ steps.pr-token.outputs.token }}
-          PUSH_TOKEN: ${{ steps.push-app-token.outputs.token || steps.fallback-push-token.outputs.token }}
+          PUSH_TOKEN: ${{ steps.push-token.outputs.token }}
         run: |
           open_prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --json number --jq length)
           if [ "$open_prs" != 0 ]; then
@@ -96,10 +97,10 @@ jobs:
 
           GH_TOKEN="$PUSH_TOKEN" gh auth setup-git
           GH_TOKEN="$PUSH_TOKEN" git -c core.hooksPath=/dev/null push -q \
-            https://github.com/prasden/pd-aws-lc.git "+HEAD:refs/heads/$BRANCH"
+            https://github.com/crypto-alg/aws-lc.git "+HEAD:refs/heads/$BRANCH"
 
           gh pr create --draft --no-maintainer-edit \
             --repo "$GITHUB_REPOSITORY" \
-            --head "prasden:$BRANCH" \
+            --head "crypto-alg:$BRANCH" \
             --title "[autofix] $MESSAGE" \
             --body-file "$OUT/pr.md"

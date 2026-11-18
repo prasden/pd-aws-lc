@@ -199,6 +199,5 @@ jobs:
     if: ${{ !cancelled() && needs.review.result != 'skipped' }}
     permissions: *oidc
     uses: ./.github/workflows/autofix_resolve.yml
-    secrets: inherit
     with:
       targets: ${{ needs.get-failing-integrations.outputs.targets }}

@@ -67,6 +67,7 @@ exec docker run -v /var/run/docker.sock:/var/run/docker.sock \
     -w ${GITHUB_WORKSPACE} \
     ${DOCKER_OPTIONS} \
     ${ENV_FLAGS} \
+    -e INPUT_RUN \
     --entrypoint=${INPUT_SHELL} ${INPUT_IMAGE} \
     -c "cat > /tmp/actions-run.sh <<- 'EOF' && chmod +x /tmp/actions-run.sh && /tmp/actions-run.sh
     set -ex
@@ -76,19 +77,8 @@ exec docker run -v /var/run/docker.sock:/var/run/docker.sock \
     fi
 
     if [[ \"${INPUT_USER}z\" != \"z\" ]]; then
-        mkdir -p /home/${INPUT_USER}
-        chown -R ${INPUT_USER}:${INPUT_USER} /home/${INPUT_USER}
         chown -R ${INPUT_USER}:${INPUT_USER} /codebuild/output
-        export CONTAINER_PATH=\${PATH}
-        cat > /tmp/run-as.sh <<- 'EOSU' && chmod +x /tmp/run-as.sh && su -p ${INPUT_USER} /tmp/run-as.sh
-            set -ex
-            export HOME=/home/${INPUT_USER}
-            export PATH=\${CONTAINER_PATH}
-            unset CONTAINER_PATH
-            pushd ${GITHUB_WORKSPACE}
-            ${INPUT_RUN}
-            popd
-EOSU
+        ${GITHUB_ACTION_PATH}/run-as-user.sh ${INPUT_USER} \"\${INPUT_RUN}\"
     else
         ${INPUT_RUN}
     fi

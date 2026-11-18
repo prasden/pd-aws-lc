@@ -28,7 +28,7 @@ mkdir -p ${SCRATCH_FOLDER}
 rm -rf "${SCRATCH_FOLDER:?}"/*
 cd ${SCRATCH_FOLDER}
 
-export CFLAGS="-I$AWS_LC_INSTALL_FOLDER/include ${CFLAGS:=}"
+export CFLAGS="-I$AWS_LC_INSTALL_DIR/include ${CFLAGS:=}"
 export CPPFLAGS="-I$AWS_LC_INSTALL_FOLDER/include ${CXXFLAGS:=}"
 export CXXFLAGS="-I$AWS_LC_INSTALL_FOLDER/include ${CXXFLAGS:=}"
 export LDFLAGS="-L$AWS_LC_INSTALL_FOLDER/lib ${LDFLAGS:=}"

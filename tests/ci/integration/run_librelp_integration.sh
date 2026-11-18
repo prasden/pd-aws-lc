@@ -29,7 +29,7 @@ AWS_LC_INSTALL_FOLDER="${SCRATCH_FOLDER}/aws-lc-install"
 
 function librelp_build() {
   autoreconf -fi  
-  PKG_CONFIG_PATH="${AWS_LC_INSTALL_FOLDER}/lib/pkgconfig" ./configure --enable-tls-openssl --enable-compile-warnings=yes
+  PKG_CONFIG_PATH="${AWS_LC_INSTALL_DIR}/lib/pkgconfig" ./configure --enable-tls-openssl --enable-compile-warnings=yes
   make -j ${NUM_CPU_THREADS}
 }
 

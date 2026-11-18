@@ -40,7 +40,7 @@ rm -rf "${SCRATCH_FOLDER:?}"/*
 pushd "${SCRATCH_FOLDER}"
 
 function curl_build() {
-  cmake -DCMAKE_DEBUG_POSTFIX='' -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="${AWS_LC_INSTALL_FOLDER}" -DCMAKE_INSTALL_PREFIX="${CURL_INSTALL_FOLDER}" -B "${CURL_BUILD_FOLDER}" -S "${CURL_SRC_FOLDER}"
+  cmake -DCMAKE_DEBUG_POSTFIX='' -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="${AWS_LC_INSTALL_DIR}" -DCMAKE_INSTALL_PREFIX="${CURL_INSTALL_FOLDER}" -B "${CURL_BUILD_FOLDER}" -S "${CURL_SRC_FOLDER}"
   cmake --build "${CURL_BUILD_FOLDER}" --target install -j "${NUM_CPU_THREADS}"
   ${AWS_LC_BUILD_FOLDER}/check-linkage.sh "${CURL_INSTALL_FOLDER}/lib/libcurl.so" crypto || exit 1
   ${AWS_LC_BUILD_FOLDER}/check-linkage.sh "${CURL_INSTALL_FOLDER}/lib/libcurl.so" ssl || exit 1

@@ -14,7 +14,7 @@ function build_and_test_accp() {
   pushd "${ACCP_SRC}"
   export JAVA_HOME=$(readlink -f /usr/bin/javac | sed "s:/bin/javac::")
   export PATH=$JAVA_HOME/bin:$PATH
-  ./gradlew -DAWSLC_SRC_DIR="${SRC_ROOT}" -DAWSLC_GITVERSION="HEAD" -DFIPS="$ACCP_FIPS" test
+  ./gradlew -DAWSLC_SRC_DIR="${SRC_ROOT}" -DAWSLC_GITVERSION="HEAD" -DFIPS="$ACCP_FIPS" tests
   popd
 }
 

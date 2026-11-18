@@ -36,7 +36,7 @@ function monit_upgrade_reminder() {
 
 function monit_build() {
   ./bootstrap  
-  ./configure --with-ssl-static="${AWS_LC_INSTALL_FOLDER}"
+  ./configure --with-ssl-static="${AWS_LC_INSTALL_DIR}"
   make -j ${NUM_CPU_THREADS}
 }
 

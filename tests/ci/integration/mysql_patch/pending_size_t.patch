@@ -5,7 +5,7 @@ index 44b980d3e4..bdf79319f2 100644
 @@ -91,7 +91,11 @@ class Operation {
  
      BIO *bio_;
-     SSL *ssl_;
+     SSL *ssl;
 +#if defined (OPENSSL_IS_AWSLC)
 +    size_t pending_;
 +#else

@@ -58,7 +58,7 @@ function krb5_build() {
   # extra dependencies and additional crypto surface area not relevant to this
   # integration), and we point the configure script at our AWS-LC install via
   # CPPFLAGS / LDFLAGS so its OpenSSL probes find AWS-LC's headers and libs.
-  CPPFLAGS="-I${AWS_LC_INSTALL_FOLDER}/include ${CPPFLAGS:-}" \
+  CPPFLAGS="-I${AWS_LC_INSTALL_DIR}/include ${CPPFLAGS:-}" \
   LDFLAGS="-L${AWS_LC_INSTALL_FOLDER}/lib ${LDFLAGS:-}" \
   PKG_CONFIG_PATH="${AWS_LC_INSTALL_FOLDER}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}" \
   ./configure \

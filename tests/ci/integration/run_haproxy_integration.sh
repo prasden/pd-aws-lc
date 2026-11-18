@@ -19,7 +19,7 @@ SCRATCH_FOLDER=${SYS_ROOT}/"scratch"
 AWS_LC_BUILD_FOLDER="${SCRATCH_FOLDER}/aws-lc-build"
 AWS_LC_INSTALL_FOLDER="${SCRATCH_FOLDER}/aws-lc-install"
 HAPROXY_SRC="${SCRATCH_FOLDER}/haproxy"
-export LD_LIBRARY_PATH="${AWS_LC_INSTALL_FOLDER}/lib"
+export LD_LIBRARY_PATH="${AWS_LC_INSTALL_DIR}/lib"
 
 function build_and_test_haproxy() {
   cd ${HAPROXY_SRC}

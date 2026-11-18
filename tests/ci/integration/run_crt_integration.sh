@@ -20,7 +20,7 @@ record_repo_commit "${CRT_SRC_FOLDER}"
 cd "${CRT_SRC_FOLDER}"
 # The CRT has a submodule for AWS-LC, overwrite that with the local version
 rm -rf crt/aws-lc/*
-cp -r ${SRC_ROOT}/* crt/aws-lc/
+cp -r ${SRC_DIR}/* crt/aws-lc/
 
 # Don't pre-build AWS-LC, the CRT will build all of it's dependencies how it wants them built
 mkdir build && cd build

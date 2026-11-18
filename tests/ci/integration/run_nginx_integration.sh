@@ -40,7 +40,7 @@ function nginx_build() {
     --with-stream_ssl_preread_module \
     --with-mail \
     --with-mail_ssl_module \
-    --with-cc-opt="-I${AWS_LC_INSTALL_FOLDER}/include" \
+    --with-cc-opt="-I${AWS_LC_INSTALL_DIR}/include" \
     --with-ld-opt="-L${AWS_LC_INSTALL_FOLDER}/lib"
   make -j "$NUM_CPU_THREADS" install
   ls -R ${NGINX_BUILD_FOLDER}

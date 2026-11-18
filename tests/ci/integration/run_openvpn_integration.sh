@@ -39,7 +39,7 @@ cd ${SCRATCH_FOLDER}
 function openvpn_build() {
   autoreconf -ivf
 
-  OPENSSL_CFLAGS="-I/${AWS_LC_INSTALL_FOLDER}/include" \
+  OPENSSL_CFLAGS="-I/${AWS_LC_INSTALL_DIR}/include" \
   OPENSSL_LIBS="-L/${AWS_LC_INSTALL_FOLDER}/lib -lssl -lcrypto" \
   LDFLAGS="-Wl,-rpath=/${AWS_LC_INSTALL_FOLDER}/lib" \
   ./configure \

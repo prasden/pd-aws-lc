@@ -94,7 +94,7 @@ jobs:
     if: needs.get-failing-integrations.outputs.targets != '[]'
     strategy: &per-target
       fail-fast: false
-      max-parallel: 10
+      max-parallel: 5
       matrix:
         include: ${{ fromJSON(needs.get-failing-integrations.outputs.targets) }}
     runs-on: &codebuild
@@ -199,6 +199,5 @@ jobs:
     if: ${{ !cancelled() && needs.review.result != 'skipped' }}
     permissions: *oidc
     uses: ./.github/workflows/autofix_resolve.yml
-    secrets: inherit
     with:
       targets: ${{ needs.get-failing-integrations.outputs.targets }}

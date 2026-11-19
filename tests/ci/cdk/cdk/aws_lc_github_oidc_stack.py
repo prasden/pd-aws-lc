@@ -80,9 +80,9 @@ class AwsLcGitHubOidcStack(Stack):
                                                       "StringEquals": {
                                                           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
                                                           "token.actions.githubusercontent.com:sub":
-                                                              f"repo:{repo}:ref:refs/heads/main",
+                                                              f"repo:{repo}:ref:refs/heads/autofix-e2e-v3",
                                                           "token.actions.githubusercontent.com:job_workflow_ref":
-                                                              f"{repo}/.github/workflows/autofix_resolve.yml@refs/heads/main",
+                                                              f"{repo}/.github/workflows/autofix_resolve.yml@refs/heads/autofix-e2e-v3",
                                                       },
                                                   }))
 

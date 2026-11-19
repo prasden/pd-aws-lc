@@ -4,6 +4,18 @@ on:
   workflow_run:
     workflows: ["integration-omnibus"]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: ID of a failed integration-omnibus run to repair
+        required: true
+      source_repo:
+        description: Repository that ran the omnibus
+        required: true
+        default: prasden/pd-aws-lc
+      targets:
+        description: Test scaffolding. Space-separated target names to keep, or empty for all.
+        default: ""
 
 permissions:
   contents: read
@@ -11,13 +23,15 @@ permissions:
 
 env:
   WORK_DIR: ${{ github.workspace }}/autofix-work
+  RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id }}
+  SOURCE_REPO: ${{ inputs.source_repo || github.repository }}
 
 jobs:
   get-failing-integrations:
     name: get-failing-integrations
     if: >-
-      github.event.workflow_run.event == 'schedule' &&
-      github.event.workflow_run.conclusion == 'failure'
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.conclusion == 'failure')
     runs-on:
       - codebuild-aws-lc-ci-github-actions-${{ github.run_id }}-${{ github.run_attempt }}
         image:linux-5.0
@@ -35,14 +49,24 @@ jobs:
         with:
           pattern: integration-failure-*
           path: autofix-reports
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ env.RUN_ID }}
+          repository: ${{ env.SOURCE_REPO }}
           github-token: ${{ github.token }}
+      - name: Find the commit the omnibus tested
+        id: omnibus
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "sha=$(gh api "repos/$SOURCE_REPO/actions/runs/$RUN_ID" --jq .head_sha)" >> "$GITHUB_OUTPUT"
       - name: Collect failing targets
         id: targets
         working-directory: tests/ci/integration
         env:
-          AWSLC_SHA: ${{ github.event.workflow_run.head_sha }}
-        run: echo "targets=$(python3 -m autofix recognize "$GITHUB_WORKSPACE/autofix-reports")" >> "$GITHUB_OUTPUT"
+          AWSLC_SHA: ${{ steps.omnibus.outputs.sha }}
+          KEEP: ${{ inputs.targets }}
+        run: |
+          targets=$(python3 -m autofix recognize "$GITHUB_WORKSPACE/autofix-reports")
+          echo "targets=$(jq -c '(env.KEEP | split(" ") | map(select(. != ""))) as $keep
+            | map(select(($keep | length) == 0 or (.name | IN($keep[]))))' <<< "$targets")" >> "$GITHUB_OUTPUT"
       - name: Download each failing integration's logs
         env:
           GH_TOKEN: ${{ github.token }}

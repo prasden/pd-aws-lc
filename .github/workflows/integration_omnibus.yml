@@ -51,6 +51,8 @@ jobs:
             ipv6: true
             options: --privileged
             run: ./tests/ci/integration/run_bind9_integration.sh
+    env:
+      ACCP_FIPS: ${{ matrix.accp_fips || '' }}
     steps:
       - uses: actions/checkout@v7
       - name: Login to Amazon ECR

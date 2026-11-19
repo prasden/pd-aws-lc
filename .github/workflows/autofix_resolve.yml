@@ -7,6 +7,10 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   resolve:
     name: resolve (${{ matrix.name }})
@@ -37,11 +41,14 @@ jobs:
         with:
           name: autofix-${{ matrix.name }}
           path: ${{ env.OUT }}
+      - name: Check the reviewer judged the fix safe
+        run: |
+          jq -e '.outcome == "safe"' "$OUT/review.json" ||
+            { echo "::error::The reviewer did not judge the fix safe, so no PR is opened."; exit 1; }
+          test -f "$OUT/pr.md"
       - name: Apply the fix
         working-directory: aws-lc-fix
-        run: |
-          test -f "$OUT/pr.md"
-          git apply --index "$OUT/changes.diff"
+        run: git apply --index "$OUT/changes.diff"
       - name: Check the fix edits only the runner and its patch files
         working-directory: aws-lc-fix
         env:

@@ -77,7 +77,7 @@ class AwsLcGitHubOidcStack(Stack):
                                           assumed_by=iam.WebIdentityPrincipal(self.oidc_provider.attr_arn, {
                                               "StringEquals": {
                                                   "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-                                                  "token.actions.githubusercontent.com:event_name": "workflow_run",
+                                                  "token.actions.githubusercontent.com:event_name": ["workflow_run", "workflow_dispatch"],
                                               },
                                               "StringLike": {
                                                   "token.actions.githubusercontent.com:sub": f"repo:{repo}:*",
@@ -140,9 +140,9 @@ class AwsLcGitHubOidcStack(Stack):
                                                       "StringEquals": {
                                                           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
                                                           "token.actions.githubusercontent.com:sub":
-                                                              f"repo:{repo}:ref:refs/heads/main",
+                                                              f"repo:{repo}:ref:refs/heads/autofix-e2e-v3",
                                                           "token.actions.githubusercontent.com:job_workflow_ref":
-                                                              f"{repo}/.github/workflows/autofix_resolve.yml@refs/heads/main",
+                                                              f"{repo}/.github/workflows/autofix_resolve.yml@refs/heads/autofix-e2e-v3",
                                                       },
                                                   }))
 

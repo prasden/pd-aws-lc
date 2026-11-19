@@ -12,7 +12,7 @@ index 3101d51..4e9eb69 100644
 --- a/src/trspi/crypto/openssl/symmetric.c
 +++ b/src/trspi/crypto/openssl/symmetric.c
 @@ -151,9 +151,11 @@ get_openssl_cipher(UINT16 alg, UINT16 mode)
- 				case TR_SYM_MODE_CBC_STALE:
+ 				case TR_SYM_MODE_CBC:
  					cipher = (EVP_CIPHER *)EVP_aes_128_cbc();
  					break;
 +#ifndef OPENSSL_IS_AWSLC

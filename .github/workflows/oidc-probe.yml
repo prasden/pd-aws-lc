@@ -1,0 +1,30 @@
+name: oidc-probe
+on:
+  workflow_dispatch:
+  push:
+    branches: [e2e-oidc-probe, e2e-oidc-probe-head]
+  pull_request:
+    branches: [e2e-oidc-probe]
+  pull_request_target:
+    branches: [e2e-oidc-probe]
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe
+        run: |
+          set -u
+          TOKEN=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          echo "::add-mask::$TOKEN"
+          echo "CLAIMS event=${{ github.event_name }}"
+          echo "$TOKEN" | python3 -c 'import sys,json,base64;p=sys.stdin.read().split(".")[1];c=json.loads(base64.urlsafe_b64decode(p+"="*(-len(p)%4)));print("CLAIMS",json.dumps({k:c.get(k) for k in ["sub","event_name","ref","job_workflow_ref","workflow_ref","repository"]}))'
+          for r in Control EvMatch EvNoMatch RefNoMatch MainShared MainImage NewShared NewImage; do
+            if out=$(aws sts assume-role-with-web-identity --role-arn arn:aws:iam::535337619039:role/E2eOidcProbe-$r --role-session-name probe --web-identity-token "$TOKEN" --query AssumedRoleUser.Arn --output text 2>&1); then
+              echo "RESULT ${{ github.event_name }} $r ALLOW"
+            else
+              echo "RESULT ${{ github.event_name }} $r DENY $(echo "$out" | grep -o 'AccessDenied\|InvalidIdentityToken\|[A-Za-z]*Exception' | head -1)"
+            fi
+          done
